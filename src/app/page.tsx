@@ -54,9 +54,21 @@ export default function HomePage() {
   );
 
   const canCompare = parsedFiles.length >= 2;
+  const hasComparableExcel = excelFiles.length >= 2;
+  const hasComparableDoc = docFiles.length >= 2;
+  const canActuallyCompare = hasComparableExcel || hasComparableDoc;
+  const [compareError, setCompareError] = useState<string | null>(null);
 
   const handleCompare = useCallback(() => {
-    if (parsedFiles.length < 2) return;
+    if (parsedFiles.length < 2) {
+      setCompareError('请至少上传 2 个可解析的文件');
+      return;
+    }
+    if (!hasComparableExcel && !hasComparableDoc) {
+      setCompareError('文件类型不匹配：需要至少 2 个同类型文件（Excel 与 Excel 比对，文档与文档比对）');
+      return;
+    }
+    setCompareError(null);
     setIsAnalyzing(true);
 
     try {
@@ -144,13 +156,18 @@ export default function HomePage() {
         modified: totalModified,
         comparisonType,
       });
-      setActiveTab('result');
+      if (results.length === 0) {
+        setCompareError('未找到可比对的内容：请确保文件包含有效数据且类型匹配');
+      } else {
+        setActiveTab('result');
+      }
     } catch (err) {
       console.error('比对失败:', err);
+      setCompareError(err instanceof Error ? `比对失败：${err.message}` : '比对失败，请重试');
     } finally {
       setIsAnalyzing(false);
     }
-  }, [parsedFiles, excelFiles, docFiles]);
+  }, [parsedFiles, excelFiles, docFiles, hasComparableExcel, hasComparableDoc]);
 
   const handleExport = useCallback(
     (format: 'xlsx' | 'csv' = 'xlsx') => {
@@ -329,6 +346,13 @@ export default function HomePage() {
                 onClick={handleCompare}
                 disabled={!canCompare || isAnalyzing}
                 className="bg-gradient-to-r from-slate-700 to-slate-900 hover:from-slate-800 hover:to-slate-950"
+                title={
+                  !canCompare
+                    ? files.length === 0
+                      ? '请先上传文件'
+                      : `已上传 ${files.length} 个文件，已解析 ${parsedFiles.length} 个，至少需要 2 个可解析文件`
+                    : ''
+                }
               >
                 <GitCompare className="h-4 w-4 mr-2" />
                 {isAnalyzing ? '分析中...' : '比对分析'}
@@ -339,6 +363,19 @@ export default function HomePage() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* 错误提示 */}
+        {compareError && (
+          <div className="mb-4 flex items-start gap-2 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">
+            <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">{compareError}</div>
+            <button
+              onClick={() => setCompareError(null)}
+              className="text-red-500 hover:text-red-700"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {/* 统计卡片 */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           {stats.map((stat) => (
@@ -413,14 +450,24 @@ export default function HomePage() {
                           <div>
                             <p className="text-sm font-medium text-slate-700">
                               已就绪 {parsedFiles.length} 个文件
+                              {excelFiles.length >= 2 && (
+                                <span className="ml-2 text-xs text-emerald-600">
+                                  · {excelFiles.length} 个表格可比对
+                                </span>
+                              )}
+                              {docFiles.length >= 2 && (
+                                <span className="ml-2 text-xs text-emerald-600">
+                                  · {docFiles.length} 个文档可比对
+                                </span>
+                              )}
                             </p>
                             <p className="text-xs text-slate-500">
-                              点击右上角"比对分析"开始比对
+                              点击下方按钮开始比对分析
                             </p>
                           </div>
                           <Button
                             onClick={handleCompare}
-                            disabled={isAnalyzing}
+                            disabled={isAnalyzing || !canActuallyCompare}
                             className="bg-gradient-to-r from-slate-700 to-slate-900 hover:from-slate-800 hover:to-slate-950"
                           >
                             <GitCompare className="h-4 w-4 mr-2" />

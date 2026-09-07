@@ -15,7 +15,7 @@ import type { UploadedFile, ParsedData, SheetData, ParagraphData } from '@/types
 
 interface FileUploadProps {
   files: UploadedFile[];
-  onFilesChange: (files: UploadedFile[]) => void;
+  onFilesChange: React.Dispatch<React.SetStateAction<UploadedFile[]>>;
   multiple?: boolean;
 }
 
@@ -161,8 +161,11 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
     }));
 
     // 使用本地变量维护状态，避免闭包捕获旧值
-    let currentFiles = [...files, ...newFiles];
-    onFilesChange(currentFiles);
+    let currentFiles = [...newFiles];
+    onFilesChange((prev: UploadedFile[]) => {
+      currentFiles = [...prev, ...newFiles];
+      return currentFiles;
+    });
     setUploadProgress(0);
 
     // 逐个解析
