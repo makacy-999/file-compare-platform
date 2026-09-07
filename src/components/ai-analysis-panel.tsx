@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useRef, useMemo, useCallback } from 'react';
 import {
   Sparkles,
   RotateCcw,
   Copy,
   Check,
+  Square,
   AlertCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -22,12 +23,6 @@ interface AIAnalysisPanelProps {
   disabled?: boolean;
 }
 
-/**
- * 纯静态版本的 AI 分析面板
- * - 生成结构化的规则化分析报告（基于比对数据计算）
- * - 不需要后端 LLM 调用，纯前端即可运行
- * - 适合 GitHub Pages 等纯静态环境
- */
 export function AIAnalysisPanel({
   files,
   diffResults,
@@ -35,168 +30,100 @@ export function AIAnalysisPanel({
   disabled,
 }: AIAnalysisPanelProps) {
   const [analysisText, setAnalysisText] = useState('');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [hasAnalyzed, setHasAnalyzed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
-  const canAnalyze = diffResults.length > 0 && summary && !disabled;
+  const canAnalyze = diffResults.length > 0 && summary && !disabled && !isAnalyzing;
 
-  // 生成规则化分析报告
-  const generateReport = (): string => {
-    if (!summary) return '';
+  const handleStartAnalysis = useCallback(async () => {
+    if (!canAnalyze || !summary) return;
 
-    const lines: string[] = [];
-
-    lines.push('# 📊 文件比对分析报告');
-    lines.push('');
-    lines.push(`生成时间：${new Date().toLocaleString('zh-CN')}`);
-    lines.push('');
-
-    // 1. 整体概览
-    lines.push('## 一、整体概览');
-    lines.push('');
-    lines.push(`本次共比对 **${summary.filesCompared}** 个文件，发现 **${summary.totalDifferences}** 处差异。`);
-    lines.push('');
-    lines.push('| 差异类型 | 数量 |');
-    lines.push('|---------|------|');
-    lines.push(`| 新增 | ${summary.added} |`);
-    lines.push(`| 删除 | ${summary.removed} |`);
-    lines.push(`| 修改 | ${summary.modified} |`);
-    lines.push('');
-
-    // 文件列表
-    if (files.length > 0) {
-      lines.push('**参与比对的文件：**');
-      files.forEach((f) => {
-        const type = f.type === 'excel' ? 'Excel 表格' : f.type === 'word' ? 'Word 文档' : f.type === 'pdf' ? 'PDF 文档' : '图片';
-        const sizeKB = (f.size / 1024).toFixed(1);
-        lines.push(`- ${f.name}（${type}，${sizeKB} KB）`);
-      });
-      lines.push('');
-    }
-
-    // 2. 详细差异分析
-    lines.push('## 二、详细差异分析');
-    lines.push('');
-
-    diffResults.forEach((result, idx) => {
-      if ('sheetName' in result) {
-        lines.push(`### ${idx + 1}. 工作表「${result.sheetName}」`);
-        lines.push('');
-        lines.push(`- 主键列：\`${result.keyColumn}\``);
-        lines.push(`- 原表行数：${result.totalOldRows}，新表行数：${result.totalNewRows}`);
-        lines.push(`- 新增 ${result.addedRows} 行，删除 ${result.removedRows} 行，修改 ${result.modifiedRows} 行，不变 ${result.unchangedRows} 行`);
-        lines.push('');
-
-        if (result.modifiedRows > 0) {
-          lines.push('**修改项示例（前 5 条）：**');
-          const modifiedRows = result.rows.filter((r) => r.diffType === 'modified').slice(0, 5);
-          modifiedRows.forEach((row) => {
-            const changes = row.cells
-              .filter((c) => c.diffType === 'modified')
-              .map((c) => `${c.column}: \`${c.oldValue}\` → \`${c.newValue}\``)
-              .join('、');
-            lines.push(`- 行 [${row.key}]：${changes}`);
-          });
-          lines.push('');
-        }
-
-        if (result.addedRows > 0) {
-          lines.push(`**新增 ${result.addedRows} 行**，主要集中在尾部或中间插入。`);
-          lines.push('');
-        }
-
-        if (result.removedRows > 0) {
-          lines.push(`**删除 ${result.removedRows} 行**，请确认这些数据是否应该移除。`);
-          lines.push('');
-        }
-      } else if ('type' in result) {
-        lines.push(`### ${idx + 1}. 文档比对`);
-        lines.push('');
-        lines.push(`- 原文件：${result.oldFileName}`);
-        lines.push(`- 新文件：${result.newFileName}`);
-        lines.push(`- 原段落数：${result.totalOldParagraphs}，新段落数：${result.totalNewParagraphs}`);
-        lines.push(`- 新增 ${result.added} 段，删除 ${result.removed} 段，修改 ${result.modified} 段`);
-        lines.push('');
-      }
-    });
-
-    // 3. 关键差异与风险提示
-    lines.push('## 三、关键差异与风险提示');
-    lines.push('');
-
-    if (summary.totalDifferences === 0) {
-      lines.push('✅ **未发现任何差异**。两个文件内容完全一致。');
-    } else {
-      const changeRate = summary.filesCompared > 0
-        ? ((summary.totalDifferences / Math.max(1, summary.added + summary.removed + summary.modified + 100)) * 100).toFixed(1)
-        : '0';
-
-      if (summary.modified > 0) {
-        lines.push('⚠️ **数据修改风险**：');
-        lines.push('- 存在数据字段修改，请确认修改是否符合业务预期。');
-        lines.push('- 建议重点关注金额、日期、状态等关键字段的变更。');
-        lines.push('');
-      }
-
-      if (summary.removed > 0) {
-        lines.push('🔴 **数据删除风险**：');
-        lines.push(`- 检测到 ${summary.removed} 条记录被删除，请确认是否为误操作。`);
-        lines.push('- 建议与业务方确认删除的必要性，避免数据丢失。');
-        lines.push('');
-      }
-
-      if (summary.added > 0) {
-        lines.push('🟢 **新增数据提示**：');
-        lines.push(`- 新增 ${summary.added} 条记录，请确保新数据的完整性和准确性。`);
-        lines.push('');
-      }
-
-      if (Number(changeRate) > 30) {
-        lines.push('🔶 **差异率较高**：');
-        lines.push(`- 当前差异率约 ${changeRate}%，建议人工复核，确认是否属于正常版本迭代。`);
-        lines.push('');
-      }
-    }
-
-    // 4. 优化建议
-    lines.push('## 四、优化建议');
-    lines.push('');
-    lines.push('1. **定期比对**：建议对重要文件定期进行版本比对，及时发现异常变更。');
-    lines.push('2. **主键规范**：Excel 比对依赖主键列，请确保主键列值唯一且不为空。');
-    lines.push('3. **版本管理**：建议对文件使用版本号命名（如 `数据_v1.xlsx`、`数据_v2.xlsx`）。');
-    lines.push('4. **备份留存**：重要文件修改前请做好备份，便于回溯。');
-    lines.push('5. **结果导出**：可使用「导出」功能将分析结果保存为 Excel，便于分享和归档。');
-    lines.push('');
-
-    lines.push('---');
-    lines.push('*本报告由文件比对分析平台自动生成（规则化分析模式）。*');
-
-    return lines.join('\n');
-  };
-
-  const handleStartAnalysis = () => {
-    if (!canAnalyze) return;
-    const report = generateReport();
-
-    // 模拟打字机效果
     setAnalysisText('');
+    setError(null);
+    setIsAnalyzing(true);
     setHasAnalyzed(true);
-    let i = 0;
-    const speed = 3; // 每次追加字符数
-    const timer = setInterval(() => {
-      i += speed;
-      if (i >= report.length) {
-        setAnalysisText(report);
-        clearInterval(timer);
-      } else {
-        setAnalysisText(report.slice(0, i));
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const fileSummaries = files
+        .filter((f) => f.status === 'parsed' && f.data)
+        .map((f) => getParsedDataSummary(f.data!));
+
+      const response = await fetch('/api/ai/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileSummaries, diffResults, summary }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || `分析失败 (${response.status})`);
       }
-    }, 10);
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('无法读取响应流');
+
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // 解析 SSE 消息
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const chunk = line.slice(6);
+            if (chunk === '[DONE]') continue;
+            try {
+              const data = JSON.parse(chunk);
+              if (data.type === 'content' && data.content) {
+                setAnalysisText((prev) => prev + data.content);
+              } else if (data.type === 'error') {
+                throw new Error(data.message || '分析出错');
+              }
+            } catch {
+              // 忽略非 JSON 数据块
+              setAnalysisText((prev) => prev + chunk);
+            }
+          }
+        }
+      }
+    } catch (err: unknown) {
+      if ((err as { name?: string }).name === 'AbortError') {
+        setAnalysisText((prev) => prev + '\n\n---\n[分析已停止]');
+      } else {
+        const msg = err instanceof Error ? err.message : '未知错误';
+        setError(msg);
+      }
+    } finally {
+      setIsAnalyzing(false);
+      abortRef.current = null;
+    }
+  }, [canAnalyze, summary, files, diffResults]);
+
+  const handleStop = () => {
+    abortRef.current?.abort();
+    setIsAnalyzing(false);
   };
 
   const handleReset = () => {
+    abortRef.current?.abort();
     setAnalysisText('');
     setHasAnalyzed(false);
+    setIsAnalyzing(false);
+    setError(null);
   };
 
   const handleCopy = async () => {
@@ -225,10 +152,12 @@ export function AIAnalysisPanel({
         <div className="flex items-center justify-between">
           <CardTitle className="text-base font-semibold flex items-center gap-2">
             <Sparkles className="w-5 h-5 text-violet-600" />
-            智能分析
-            <Badge variant="secondary" className="text-xs font-normal">
-              规则引擎
-            </Badge>
+            AI 智能分析
+            {isAnalyzing && (
+              <Badge variant="secondary" className="text-xs font-normal animate-pulse">
+                分析中
+              </Badge>
+            )}
           </CardTitle>
           <div className="flex items-center gap-1">
             {hasAnalyzed && (
@@ -239,6 +168,7 @@ export function AIAnalysisPanel({
                   onClick={handleCopy}
                   title="复制"
                   className="h-8 w-8"
+                  disabled={isAnalyzing}
                 >
                   {copied ? (
                     <Check className="w-4 h-4 text-emerald-600" />
@@ -266,9 +196,11 @@ export function AIAnalysisPanel({
             <div className="w-14 h-14 rounded-full bg-violet-50 flex items-center justify-center mb-4">
               <Sparkles className="w-7 h-7 text-violet-600" />
             </div>
-            <h3 className="text-sm font-medium text-slate-800 mb-1">一键生成分析报告</h3>
+            <h3 className="text-sm font-medium text-slate-800 mb-1">
+              AI 智能差异分析
+            </h3>
             <p className="text-xs text-slate-500 mb-4 max-w-xs">
-              基于比对数据，自动生成概览、差异详情、风险提示与优化建议
+              基于大语言模型，深度解读文件差异，给出风险提示与优化建议
             </p>
             {stats && (
               <div className="flex gap-3 mb-4 text-xs">
@@ -283,29 +215,45 @@ export function AIAnalysisPanel({
               className="bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white"
             >
               <Sparkles className="w-4 h-4 mr-2" />
-              生成分析报告
+              开始 AI 分析
             </Button>
             {!canAnalyze && diffResults.length === 0 && (
               <p className="text-xs text-slate-400 mt-3">请先上传文件并执行比对</p>
             )}
           </div>
         ) : (
-          <ScrollArea className="flex-1 rounded-md border border-slate-200 bg-slate-50/50">
-            <div className="p-4 text-sm text-slate-700 leading-relaxed whitespace-pre-wrap font-mono">
-              {analysisText}
-              {analysisText.length < generateReport().length && (
-                <span className="inline-block w-2 h-4 bg-violet-500 ml-0.5 animate-pulse align-middle" />
-              )}
-            </div>
-          </ScrollArea>
-        )}
+          <>
+            <ScrollArea className="flex-1 rounded-md border border-slate-200 bg-slate-50/50">
+              <div className="p-4 text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">
+                {analysisText}
+                {isAnalyzing && (
+                  <span className="inline-block w-2 h-4 bg-violet-500 ml-0.5 animate-pulse align-middle" />
+                )}
+                {error && (
+                  <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-md text-red-600 text-xs">
+                    <div className="flex items-center gap-1.5 font-medium mb-1">
+                      <AlertCircle className="w-3.5 h-3.5" />
+                      分析失败
+                    </div>
+                    {error}
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
 
-        <div className="mt-3 flex items-start gap-2 text-xs text-slate-500">
-          <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-amber-500" />
-          <span>
-            纯静态环境下使用规则引擎生成分析报告；部署到 Vercel 等 Node 环境后可启用大模型深度分析。
-          </span>
-        </div>
+            {isAnalyzing && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleStop}
+                className="mt-3 w-full border-red-200 text-red-600 hover:bg-red-50"
+              >
+                <Square className="w-3.5 h-3.5 mr-2" />
+                停止分析
+              </Button>
+            )}
+          </>
+        )}
       </CardContent>
     </Card>
   );
