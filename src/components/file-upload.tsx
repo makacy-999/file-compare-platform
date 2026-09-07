@@ -160,7 +160,9 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
       status: 'pending' as const,
     }));
 
-    onFilesChange([...files, ...newFiles]);
+    // 使用本地变量维护状态，避免闭包捕获旧值
+    let currentFiles = [...files, ...newFiles];
+    onFilesChange(currentFiles);
     setUploadProgress(0);
 
     // 逐个解析
@@ -168,33 +170,30 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
       const file = fileArray[i];
       const fileObj = newFiles[i];
 
-      onFilesChange(
-        [...files, ...newFiles].map((f) =>
-          f.id === fileObj.id ? { ...f, status: 'parsing' } : f,
-        ),
+      currentFiles = currentFiles.map((f) =>
+        f.id === fileObj.id ? { ...f, status: 'parsing' as const } : f,
       );
+      onFilesChange([...currentFiles]);
 
       try {
         const data = await parseFile(file);
-        onFilesChange(
-          [...files, ...newFiles].map((f) =>
-            f.id === fileObj.id
-              ? { ...f, status: 'parsed' as const, data }
-              : f,
-          ),
+        currentFiles = currentFiles.map((f) =>
+          f.id === fileObj.id
+            ? { ...f, status: 'parsed' as const, data }
+            : f,
         );
+        onFilesChange([...currentFiles]);
       } catch (err) {
-        onFilesChange(
-          [...files, ...newFiles].map((f) =>
-            f.id === fileObj.id
-              ? {
-                  ...f,
-                  status: 'error' as const,
-                  error: err instanceof Error ? err.message : '解析失败',
-                }
-              : f,
-          ),
+        currentFiles = currentFiles.map((f) =>
+          f.id === fileObj.id
+            ? {
+                ...f,
+                status: 'error' as const,
+                error: err instanceof Error ? err.message : '解析失败',
+              }
+            : f,
         );
+        onFilesChange([...currentFiles]);
       }
 
       setUploadProgress(Math.round(((i + 1) / fileArray.length) * 100));

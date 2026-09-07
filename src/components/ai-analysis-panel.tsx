@@ -45,9 +45,36 @@ interface AIConfig {
 
 const DEFAULT_CONFIG: AIConfig = {
   apiKey: '',
-  baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
-  model: 'doubao-seed-2-0-lite-260215',
+  baseUrl: 'https://api.coze.cn/v3',
+  model: '',
 };
+
+const PRESET_PROVIDERS = [
+  {
+    name: '扣子 Coze',
+    baseUrl: 'https://api.coze.cn/v3',
+    model: '',
+    hint: '从 coze.cn 控制台获取 API Key，模型留空即可',
+  },
+  {
+    name: '豆包/火山方舟',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    model: 'doubao-seed-2-0-lite-260215',
+    hint: '需要在火山方舟控制台创建推理接入点，填入 Endpoint ID 作为模型名',
+  },
+  {
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com/v1',
+    model: 'deepseek-chat',
+    hint: '从 deepseek.com 获取 API Key',
+  },
+  {
+    name: '通义千问',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen-plus',
+    hint: '从阿里云百炼平台获取 API Key',
+  },
+];
 
 export function AIAnalysisPanel({
   files,
@@ -327,11 +354,36 @@ ${diffsJson}
                   <Settings className="w-4 h-4 text-slate-500" />
                 </Button>
               </DialogTrigger>
-              <DialogContent>
+              <DialogContent className="max-w-md">
                 <DialogHeader>
                   <DialogTitle>AI 分析配置</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-4 py-2">
+                  <div className="space-y-2">
+                    <Label>选择平台</Label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {PRESET_PROVIDERS.map((p) => (
+                        <button
+                          key={p.name}
+                          type="button"
+                          onClick={() => {
+                            setConfig({
+                              ...config,
+                              baseUrl: p.baseUrl,
+                              model: p.model,
+                            });
+                          }}
+                          className={`px-3 py-2 text-xs rounded-md border transition-colors ${
+                            config.baseUrl === p.baseUrl
+                              ? 'bg-slate-800 text-white border-slate-800'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                          }`}
+                        >
+                          {p.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <div className="space-y-2">
                     <Label htmlFor="api-key">API Key</Label>
                     <Input
@@ -344,14 +396,14 @@ ${diffsJson}
                       }
                     />
                     <p className="text-xs text-slate-500">
-                      仅保存在你的浏览器本地，不会上传到任何服务器
+                      🔒 仅保存在你的浏览器本地，不会上传到任何服务器
                     </p>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="base-url">API 地址</Label>
                     <Input
                       id="base-url"
-                      placeholder="https://ark.cn-beijing.volces.com/api/v3"
+                      placeholder="https://api.coze.cn/v3"
                       value={config.baseUrl}
                       onChange={(e) =>
                         setConfig({ ...config, baseUrl: e.target.value })
@@ -359,21 +411,21 @@ ${diffsJson}
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="model">模型名称</Label>
+                    <Label htmlFor="model">模型名称 / Bot ID</Label>
                     <Input
                       id="model"
-                      placeholder="doubao-seed-2-0-lite-260215"
+                      placeholder="Coze 平台可留空；其他平台填模型名"
                       value={config.model}
                       onChange={(e) =>
                         setConfig({ ...config, model: e.target.value })
                       }
                     />
                   </div>
-                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-700">
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">
                     <p className="font-medium mb-1">💡 使用说明</p>
                     <p>
-                      支持 OpenAI 兼容格式的 API（如豆包/火山方舟、DeepSeek、通义千问等）。
-                      API Key 保存在本地浏览器，安全可靠。
+                      支持扣子 Coze、豆包/火山方舟、DeepSeek、通义千问等 OpenAI 兼容格式。
+                      选择对应平台后填入 API Key 即可使用。
                     </p>
                   </div>
                 </div>
