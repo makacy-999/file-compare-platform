@@ -165,27 +165,41 @@ export default function HomePage() {
         comparisonType,
       });
       if (results.length === 0) {
+        const allFileInfo = parsedFiles.map((f) => `${f.name}[类型:${f.type},状态:${f.status}]`).join('、');
         const excelInfo = excelFiles.length > 0
-          ? `（${excelFiles.map((f) => `${f.name}[${f.data?.sheets?.length || 0}个工作表]`).join('、')}）`
-          : '';
+          ? `表格：${excelFiles.map((f) => `${f.name}[${f.data?.sheets?.length || 0}个工作表,行:${f.data?.sheets?.[0]?.rows?.length || 0}]`).join('、')}`
+          : '无表格文件';
         const docInfo = docFiles.length > 0
-          ? `（${docFiles.map((f) => `${f.name}[${f.data?.paragraphs?.length || 0}段]`).join('、')}）`
-          : '';
+          ? `文档：${docFiles.map((f) => `${f.name}[${f.data?.paragraphs?.length || 0}段]`).join('、')}`
+          : '无文档文件';
         const reasons: string[] = [];
+        if (parsedFiles.length < 2) {
+          reasons.push(`解析成功的文件不足2个（当前${parsedFiles.length}个）`);
+        }
         if (excelFiles.length < 2 && docFiles.length < 2) {
-          reasons.push(`同类型文件不足2个：表格${excelFiles.length}个${excelInfo}，文档${docFiles.length}个${docInfo}`);
+          reasons.push(`同类型文件不足2个：表格${excelFiles.length}个，文档${docFiles.length}个`);
         }
         if (excelFiles.length >= 2) {
           const emptySheets = excelFiles.filter((f) => !f.data?.sheets?.length);
-          if (emptySheets.length > 0) reasons.push(`${emptySheets.length}个表格无有效数据`);
-          else {
+          if (emptySheets.length > 0) {
+            reasons.push(`${emptySheets.length}个表格无有效数据工作表`);
+          } else {
             const sheetNames = excelFiles.map((f) => (f.data?.sheets || []).map((s) => s.name));
             const commonSheets = sheetNames[0]?.filter((n) => sheetNames.every((names) => names.includes(n))) || [];
-            if (commonSheets.length === 0) reasons.push('表格间没有同名工作表，无法匹配');
+            if (commonSheets.length === 0) {
+              const allNames = sheetNames.map((names, i) => `文件${i + 1}:[${names.join(',')}]`).join(' ');
+              reasons.push(`表格间没有同名工作表，无法匹配（${allNames}）`);
+            }
           }
         }
-        const reasonText = reasons.length > 0 ? `\n原因：${reasons.join('；')}` : '';
-        setCompareError(`未找到可比对的内容：请确保文件包含有效数据且类型匹配${reasonText}`);
+        if (docFiles.length >= 2) {
+          const emptyDocs = docFiles.filter((f) => !f.data?.paragraphs?.length);
+          if (emptyDocs.length > 0) reasons.push(`${emptyDocs.length}个文档无有效段落内容`);
+        }
+        const reasonText = reasons.length > 0
+          ? `\n📋 诊断信息：\n• 已解析文件：${allFileInfo || '无'}\n• ${excelInfo}\n• ${docInfo}\n❌ 原因：${reasons.join('；')}`
+          : `\n📋 诊断信息：\n• 已解析文件：${allFileInfo || '无'}\n• ${excelInfo}\n• ${docInfo}`;
+        setCompareError(`未找到可比对的内容${reasonText}`);
       } else {
         setActiveTab('result');
       }
