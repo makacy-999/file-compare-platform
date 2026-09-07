@@ -4,25 +4,23 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: {
-    default: '新应用 | 扣子编程',
-    template: '%s | 扣子编程',
+    default: '智能文件比对分析平台',
+    template: '%s | 文件比对分析',
   },
   description:
-    '扣子编程是一款一站式云端 Vibe Coding 开发平台。通过对话轻松构建智能体、工作流和网站，实现从创意到上线的无缝衔接。',
+    '支持 Excel、Word、PDF 多格式文件批量上传、智能比对与差异分析，AI 深度解读数据变化，给出专业建议。',
   keywords: [
-    '扣子编程',
-    'Coze Code',
-    'Vibe Coding',
-    'AI 编程',
-    '智能体搭建',
-    '工作流搭建',
-    '网站搭建',
-    '网站部署',
-    '全栈开发',
-    'AI 工程师',
+    '文件比对',
+    'Excel对比',
+    '表格差异分析',
+    '文档比对',
+    'PDF比对',
+    'AI分析',
+    '数据对比',
+    '版本比对',
   ],
-  authors: [{ name: 'Coze Code Team', url: 'https://code.coze.cn' }],
-  generator: 'Coze Code',
+  authors: [{ name: '智能文件比对平台' }],
+  generator: 'File Compare Platform',
   // icons: {
   //   icon: '',
   // },
