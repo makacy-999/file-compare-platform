@@ -3,8 +3,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { Upload, X, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import mammoth from 'mammoth';
-import * as pdfjsLib from 'pdfjs-dist';
 import { cn } from '@/lib/utils';
 import {
   formatFileSize,
@@ -14,14 +12,6 @@ import {
   arrayToSheetData,
 } from '@/lib/file-utils';
 import type { UploadedFile, ParsedData, SheetData, ParagraphData } from '@/types';
-
-// 配置 PDF.js worker
-if (typeof window !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/build/pdf.worker.min.mjs',
-    import.meta.url,
-  ).toString();
-}
 
 interface FileUploadProps {
   files: UploadedFile[];
@@ -70,6 +60,7 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
   };
 
   const parseWordFile = async (file: File): Promise<ParsedData> => {
+    const mammoth = await import('mammoth');
     const arrayBuffer = await file.arrayBuffer();
     const result = await mammoth.extractRawText({ arrayBuffer });
     const paragraphs: ParagraphData[] = result.value
@@ -89,6 +80,12 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
   };
 
   const parsePdfFile = async (file: File): Promise<ParsedData> => {
+    const pdfjsLib = await import('pdfjs-dist');
+    // 配置 worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      'pdfjs-dist/build/pdf.worker.min.mjs',
+      import.meta.url,
+    ).toString();
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
     let fullText = '';
