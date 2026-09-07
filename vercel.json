@@ -1,0 +1,9 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "pnpm run build",
+  "installCommand": "pnpm install",
+  "outputDirectory": ".next",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/" }
+  ]
+}
