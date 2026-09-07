@@ -1,12 +1,27 @@
 'use client';
 
 import { useState, useCallback, useRef } from 'react';
-import { Upload, X, FileText, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Progress } from '@/components/ui/progress';
+import { Upload, X, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
+import * as XLSX from 'xlsx';
+import mammoth from 'mammoth';
+import * as pdfjsLib from 'pdfjs-dist';
 import { cn } from '@/lib/utils';
-import { formatFileSize, getFileIcon, getFileType, generateId } from '@/lib/file-utils';
-import type { UploadedFile, ParsedData, FileType } from '@/types';
+import {
+  formatFileSize,
+  getFileIcon,
+  getFileType,
+  generateId,
+  arrayToSheetData,
+} from '@/lib/file-utils';
+import type { UploadedFile, ParsedData, SheetData, ParagraphData } from '@/types';
+
+// 配置 PDF.js worker
+if (typeof window !== 'undefined') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+    'pdfjs-dist/build/pdf.worker.min.mjs',
+    import.meta.url,
+  ).toString();
+}
 
 interface FileUploadProps {
   files: UploadedFile[];
@@ -32,8 +47,113 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
     setIsDragging(false);
   }, []);
 
+  const parseExcelFile = async (file: File): Promise<ParsedData> => {
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: 'array' });
+    const sheets: SheetData[] = [];
+
+    for (const sheetName of workbook.SheetNames) {
+      const worksheet = workbook.Sheets[sheetName];
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+        header: 1,
+        defval: '',
+      }) as unknown[][];
+      const sheetData = arrayToSheetData(sheetName, jsonData);
+      sheets.push(sheetData);
+    }
+
+    return {
+      fileName: file.name,
+      sheets,
+      metadata: { size: file.size, type: file.type },
+    };
+  };
+
+  const parseWordFile = async (file: File): Promise<ParsedData> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    const paragraphs: ParagraphData[] = result.value
+      .split(/\n\n+/)
+      .filter((p) => p.trim().length > 0)
+      .map((text, idx) => ({
+        text: text.trim(),
+        index: idx,
+      }));
+
+    return {
+      fileName: file.name,
+      paragraphs,
+      textContent: result.value,
+      metadata: { size: file.size, type: file.type },
+    };
+  };
+
+  const parsePdfFile = async (file: File): Promise<ParsedData> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = '';
+    const totalPages = pdf.numPages;
+
+    for (let i = 1; i <= totalPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items
+        .map((item: unknown) => {
+          // @ts-expect-error pdfjs types
+          return item.str || '';
+        })
+        .join(' ');
+      fullText += pageText + '\n\n';
+    }
+
+    const paragraphs: ParagraphData[] = fullText
+      .split(/\n\n+/)
+      .filter((p) => p.trim().length > 0)
+      .map((text, idx) => ({
+        text: text.trim(),
+        index: idx,
+      }));
+
+    return {
+      fileName: file.name,
+      paragraphs,
+      textContent: fullText,
+      metadata: { size: file.size, type: file.type, pages: totalPages },
+    };
+  };
+
+  const parseImageFile = async (file: File): Promise<ParsedData> => {
+    return {
+      fileName: file.name,
+      textContent: `[图片文件: ${file.name}]`,
+      metadata: { size: file.size, type: file.type, format: 'image' },
+    };
+  };
+
+  const parseFile = async (file: File): Promise<ParsedData> => {
+    const fileType = getFileType(file.name, file.type);
+
+    switch (fileType) {
+      case 'excel':
+        return parseExcelFile(file);
+      case 'word':
+        return parseWordFile(file);
+      case 'pdf':
+        return parsePdfFile(file);
+      case 'image':
+        return parseImageFile(file);
+      default:
+        return {
+          fileName: file.name,
+          textContent: `[不支持的格式: ${file.name}]`,
+          metadata: { size: file.size, type: file.type },
+        };
+    }
+  };
+
   const parseFiles = async (fileList: FileList | File[]) => {
-    const newFiles: UploadedFile[] = Array.from(fileList).map((file) => ({
+    const fileArray = Array.from(fileList);
+    const newFiles: UploadedFile[] = fileArray.map((file) => ({
       id: generateId(),
       name: file.name,
       size: file.size,
@@ -46,12 +166,11 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
     onFilesChange([...files, ...newFiles]);
     setUploadProgress(0);
 
-    // 逐个解析文件
-    for (let i = 0; i < newFiles.length; i++) {
+    // 逐个解析
+    for (let i = 0; i < fileArray.length; i++) {
+      const file = fileArray[i];
       const fileObj = newFiles[i];
-      const fileData = Array.from(fileList)[i];
 
-      // 更新状态为解析中
       onFilesChange(
         [...files, ...newFiles].map((f) =>
           f.id === fileObj.id ? { ...f, status: 'parsing' } : f,
@@ -59,32 +178,14 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
       );
 
       try {
-        const formData = new FormData();
-        formData.append('files', fileData);
-
-        const response = await fetch('/api/files/parse', {
-          method: 'POST',
-          body: formData,
-        });
-
-        if (!response.ok) {
-          throw new Error('解析失败');
-        }
-
-        const result = await response.json();
-        const parsed = result.results?.[0];
-
-        if (parsed?.success && parsed.data) {
-          onFilesChange(
-            [...files, ...newFiles].map((f) =>
-              f.id === fileObj.id
-                ? { ...f, status: 'parsed' as const, data: parsed.data as ParsedData }
-                : f,
-            ),
-          );
-        } else {
-          throw new Error(parsed?.error || '解析失败');
-        }
+        const data = await parseFile(file);
+        onFilesChange(
+          [...files, ...newFiles].map((f) =>
+            f.id === fileObj.id
+              ? { ...f, status: 'parsed' as const, data }
+              : f,
+          ),
+        );
       } catch (err) {
         onFilesChange(
           [...files, ...newFiles].map((f) =>
@@ -92,14 +193,14 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
               ? {
                   ...f,
                   status: 'error' as const,
-                  error: err instanceof Error ? err.message : '未知错误',
+                  error: err instanceof Error ? err.message : '解析失败',
                 }
               : f,
           ),
         );
       }
 
-      setUploadProgress(Math.round(((i + 1) / newFiles.length) * 100));
+      setUploadProgress(Math.round(((i + 1) / fileArray.length) * 100));
     }
 
     setTimeout(() => setUploadProgress(0), 1000);
@@ -145,11 +246,11 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
       case 'error':
         return <AlertCircle className="h-4 w-4 text-red-500" />;
       default:
-        return <FileText className="h-4 w-4 text-slate-400" />;
+        return <AlertCircle className="h-4 w-4 text-slate-400" />;
     }
   };
 
-  const fileTypeLabels: Record<FileType, string> = {
+  const fileTypeLabels: Record<string, string> = {
     excel: 'Excel',
     word: 'Word',
     pdf: 'PDF',
@@ -189,10 +290,18 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
         <p className="mt-1 text-sm text-slate-500">
           支持 Excel、Word、PDF、图片等多格式文件，可批量上传
         </p>
+        <p className="mt-1 text-xs text-slate-400">
+          文件在本地浏览器解析，不上传服务器
+        </p>
 
         {uploadProgress > 0 && (
           <div className="mt-4 w-full max-w-xs">
-            <Progress value={uploadProgress} className="h-2" />
+            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-500 transition-all duration-200"
+                style={{ width: `${uploadProgress}%` }}
+              />
+            </div>
             <p className="mt-1 text-xs text-center text-slate-500">
               解析中 {uploadProgress}%
             </p>
@@ -207,14 +316,12 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
             <p className="text-sm font-medium text-slate-700">
               已上传 {files.length} 个文件
             </p>
-            <Button
-              variant="ghost"
-              size="sm"
+            <button
               onClick={() => onFilesChange([])}
-              className="text-xs text-slate-500 hover:text-red-500"
+              className="text-xs text-slate-500 hover:text-red-500 transition-colors"
             >
               清空全部
-            </Button>
+            </button>
           </div>
           <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
             {files.map((file) => (
@@ -234,16 +341,14 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
                   </p>
                   <div className="flex items-center gap-2 mt-0.5">
                     <span className="text-xs text-slate-500">
-                      {fileTypeLabels[file.type]}
+                      {fileTypeLabels[file.type] || file.type}
                     </span>
                     <span className="text-xs text-slate-400">·</span>
                     <span className="text-xs text-slate-500">
                       {formatFileSize(file.size)}
                     </span>
                     {file.status === 'error' && (
-                      <span className="text-xs text-red-500">
-                        · {file.error}
-                      </span>
+                      <span className="text-xs text-red-500">· {file.error}</span>
                     )}
                     {file.status === 'parsed' && file.data?.sheets && (
                       <span className="text-xs text-emerald-600">
