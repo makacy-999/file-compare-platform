@@ -86,12 +86,20 @@ export default function HomePage() {
           const baseSheets = baseFile.data?.sheets || [];
           const compareSheets = compareFile.data?.sheets || [];
 
-          // 匹配同名 sheet
+          // 匹配策略：优先同名匹配，找不到时按位置顺序匹配
+          const matchedCompareIndices = new Set<number>();
           for (const baseSheet of baseSheets) {
-            const matchSheet = compareSheets.find(
+            let matchSheet = compareSheets.find(
               (s) => s.name === baseSheet.name,
             );
+            let matchIdx = compareSheets.indexOf(matchSheet!);
+            if (!matchSheet) {
+              // 按位置找第一个未匹配的
+              matchIdx = compareSheets.findIndex((_, idx) => !matchedCompareIndices.has(idx));
+              if (matchIdx >= 0) matchSheet = compareSheets[matchIdx];
+            }
             if (matchSheet) {
+              matchedCompareIndices.add(matchIdx);
               const diff = diffSheets(baseSheet, matchSheet);
               const namedDiff: SheetDiffResult = {
                 ...diff,
@@ -157,7 +165,27 @@ export default function HomePage() {
         comparisonType,
       });
       if (results.length === 0) {
-        setCompareError('未找到可比对的内容：请确保文件包含有效数据且类型匹配');
+        const excelInfo = excelFiles.length > 0
+          ? `（${excelFiles.map((f) => `${f.name}[${f.data?.sheets?.length || 0}个工作表]`).join('、')}）`
+          : '';
+        const docInfo = docFiles.length > 0
+          ? `（${docFiles.map((f) => `${f.name}[${f.data?.paragraphs?.length || 0}段]`).join('、')}）`
+          : '';
+        const reasons: string[] = [];
+        if (excelFiles.length < 2 && docFiles.length < 2) {
+          reasons.push(`同类型文件不足2个：表格${excelFiles.length}个${excelInfo}，文档${docFiles.length}个${docInfo}`);
+        }
+        if (excelFiles.length >= 2) {
+          const emptySheets = excelFiles.filter((f) => !f.data?.sheets?.length);
+          if (emptySheets.length > 0) reasons.push(`${emptySheets.length}个表格无有效数据`);
+          else {
+            const sheetNames = excelFiles.map((f) => (f.data?.sheets || []).map((s) => s.name));
+            const commonSheets = sheetNames[0]?.filter((n) => sheetNames.every((names) => names.includes(n))) || [];
+            if (commonSheets.length === 0) reasons.push('表格间没有同名工作表，无法匹配');
+          }
+        }
+        const reasonText = reasons.length > 0 ? `\n原因：${reasons.join('；')}` : '';
+        setCompareError(`未找到可比对的内容：请确保文件包含有效数据且类型匹配${reasonText}`);
       } else {
         setActiveTab('result');
       }

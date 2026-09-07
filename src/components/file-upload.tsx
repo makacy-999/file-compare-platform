@@ -52,6 +52,10 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
       sheets.push(sheetData);
     }
 
+    if (sheets.length === 0) {
+      throw new Error('未找到有效工作表数据');
+    }
+
     return {
       fileName: file.name,
       sheets,
