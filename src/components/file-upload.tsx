@@ -14,15 +14,16 @@ import {
 import type { UploadedFile, ParsedData, SheetData, ParagraphData } from '@/types';
 
 interface FileUploadProps {
-  files: UploadedFile[];
-  onFilesChange: React.Dispatch<React.SetStateAction<UploadedFile[]>>;
+  files?: UploadedFile[];
+  onFilesChange?: React.Dispatch<React.SetStateAction<UploadedFile[]>>;
+  onFilesAdded?: (files: File[]) => void;
   multiple?: boolean;
 }
 
 const ACCEPTED_TYPES =
   '.xlsx,.xls,.csv,.ods,.docx,.doc,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.webp,.svg,.tiff';
 
-export function FileUpload({ files, onFilesChange, multiple = true }: FileUploadProps) {
+export function FileUpload({ files, onFilesChange, onFilesAdded, multiple = true }: FileUploadProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -154,6 +155,12 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
 
   const parseFiles = async (fileList: FileList | File[]) => {
     const fileArray = Array.from(fileList);
+
+    if (onFilesAdded) {
+      onFilesAdded(fileArray);
+      return;
+    }
+
     const newFiles: UploadedFile[] = fileArray.map((file) => ({
       id: generateId(),
       name: file.name,
@@ -166,7 +173,7 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
 
     // 使用本地变量维护状态，避免闭包捕获旧值
     let currentFiles = [...newFiles];
-    onFilesChange((prev: UploadedFile[]) => {
+    onFilesChange?.((prev: UploadedFile[]) => {
       currentFiles = [...prev, ...newFiles];
       return currentFiles;
     });
@@ -180,7 +187,7 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
       currentFiles = currentFiles.map((f) =>
         f.id === fileObj.id ? { ...f, status: 'parsing' as const } : f,
       );
-      onFilesChange([...currentFiles]);
+      onFilesChange?.([...currentFiles]);
 
       try {
         const data = await parseFile(file);
@@ -189,7 +196,7 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
             ? { ...f, status: 'parsed' as const, data }
             : f,
         );
-        onFilesChange([...currentFiles]);
+        onFilesChange?.([...currentFiles]);
       } catch (err) {
         currentFiles = currentFiles.map((f) =>
           f.id === fileObj.id
@@ -200,7 +207,7 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
               }
             : f,
         );
-        onFilesChange([...currentFiles]);
+        onFilesChange?.([...currentFiles]);
       }
 
       setUploadProgress(Math.round(((i + 1) / fileArray.length) * 100));
@@ -233,7 +240,7 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
   );
 
   const removeFile = (id: string) => {
-    onFilesChange(files.filter((f) => f.id !== id));
+    onFilesChange?.((files ?? []).filter((f) => f.id !== id));
   };
 
   const handleClick = () => {
@@ -313,21 +320,21 @@ export function FileUpload({ files, onFilesChange, multiple = true }: FileUpload
       </div>
 
       {/* 已上传文件列表 */}
-      {files.length > 0 && (
+      {(files?.length ?? 0) > 0 && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <p className="text-sm font-medium text-slate-700">
-              已上传 {files.length} 个文件
+              已上传 {files?.length ?? 0} 个文件
             </p>
             <button
-              onClick={() => onFilesChange([])}
+              onClick={() => onFilesChange?.([])}
               className="text-xs text-slate-500 hover:text-red-500 transition-colors"
             >
               清空全部
             </button>
           </div>
           <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-            {files.map((file) => (
+            {(files ?? []).map((file) => (
               <div
                 key={file.id}
                 className={cn(

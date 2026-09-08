@@ -1,676 +1,439 @@
 'use client';
 
 import { useState, useCallback, useMemo } from 'react';
-import * as XLSX from 'xlsx';
 import {
-  Upload,
-  GitCompare,
-  Download,
-  Save,
-  Sparkles,
-  BarChart3,
-  FileSpreadsheet,
-  FileText,
-  AlertTriangle,
-  TrendingUp,
-  TrendingDown,
-  Minus,
-  RefreshCw,
-  File as FilesIcon,
+  Upload, FileSpreadsheet, FileText, Image as ImageIcon, File,
+  Sparkles, Download, Trash2, AlertCircle, CheckCircle2, XCircle,
+  Loader2, ArrowRightLeft, Key,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { FileUpload } from '@/components/file-upload';
 import { DiffResultView } from '@/components/diff-result-view';
 import { AIAnalysisPanel } from '@/components/ai-analysis-panel';
-import { diffSheets, diffParagraphs } from '@/lib/file-utils';
-import type {
-  UploadedFile,
-  AnalysisResult,
-  AnalysisSummary,
-  SheetDiffResult,
-  DocumentDiffResult,
-  DiffType,
-} from '@/types';
+import { parseFile, diffSheets, exportToExcel, detectBestKeyColumn } from '@/lib/file-utils';
+import type { ParsedFile, DiffResult, DiffType, SheetData, SheetDiffResult } from '@/types';
 
-export default function HomePage() {
-  const [files, setFiles] = useState<UploadedFile[]>([]);
-  const [diffResults, setDiffResults] = useState<AnalysisResult[]>([]);
-  const [summary, setSummary] = useState<AnalysisSummary | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'upload' | 'result'>(
-    'upload',
-  );
+type CompareMode = 'auto' | 'sheet';
+type FileStatus = 'idle' | 'parsing' | 'success' | 'error';
 
-  const parsedFiles = useMemo(
-    () => files.filter((f) => f.status === 'parsed' && f.data),
-    [files],
-  );
+interface FileWithStatus extends ParsedFile {
+  status: FileStatus;
+  errorMsg?: string;
+}
 
-  const excelFiles = useMemo(
-    () => parsedFiles.filter((f) => f.type === 'excel'),
-    [parsedFiles],
-  );
+export default function Home() {
+  const [files, setFiles] = useState<FileWithStatus[]>([]);
+  const [diffResults, setDiffResults] = useState<DiffResult[]>([]);
+  const [isComparing, setIsComparing] = useState(false);
+  const [compareMode, setCompareMode] = useState<CompareMode>('auto');
+  const [selectedSheet, setSelectedSheet] = useState<string>('');
+  const [filter, setFilter] = useState<'all' | DiffType>('all');
+  const [apiKey, setApiKey] = useState('');
+  const [selectedKeyColumn, setSelectedKeyColumn] = useState<string>('');
+  const [autoKeyColumn, setAutoKeyColumn] = useState<string>('');
 
-  const docFiles = useMemo(
-    () => parsedFiles.filter((f) => f.type === 'word' || f.type === 'pdf'),
-    [parsedFiles],
-  );
+  const allSheets = useMemo(() => {
+    const sheets: string[] = [];
+    files.forEach((f) => {
+      if (f.type === 'excel' && f.data?.sheets) {
+        for (const s of f.data.sheets) {
+          if (!sheets.includes(s.name)) sheets.push(s.name);
+        }
+      }
+    });
+    return sheets;
+  }, [files]);
 
-  const canCompare = parsedFiles.length >= 2;
-  const hasComparableExcel = excelFiles.length >= 2;
-  const hasComparableDoc = docFiles.length >= 2;
-  const canActuallyCompare = hasComparableExcel || hasComparableDoc;
-  const [compareError, setCompareError] = useState<string | null>(null);
-  const [keyColumn, setKeyColumn] = useState<string>('');
-  const [diffFilter, setDiffFilter] = useState<'all' | DiffType>('all');
+  const suggestedKeyColumn = useMemo(() => {
+    if (autoKeyColumn) return autoKeyColumn;
+    const excelFiles = files.filter((f) => f.type === 'excel' && f.data?.sheets);
+    if (excelFiles.length === 0) return '';
+    const firstFile = excelFiles[0];
+    const sheets = firstFile.data!.sheets!;
+    if (sheets.length === 0) return '';
+    const bestCol = detectBestKeyColumn(sheets[0]);
+    return bestCol || sheets[0].headers[0] || '';
+  }, [files, autoKeyColumn]);
 
-  const handleCompare = useCallback(() => {
-    if (parsedFiles.length < 2) {
-      setCompareError('请至少上传 2 个可解析的文件');
-      return;
+  const handleFilesAdded = useCallback(async (newFiles: File[]) => {
+    const filesWithStatus: FileWithStatus[] = newFiles.map((f) => ({
+      file: f, name: f.name, type: 'other' as const, status: 'idle' as const,
+    }));
+    setFiles((prev) => [...prev, ...filesWithStatus]);
+
+    for (const f of newFiles) {
+      try {
+        const parsed = await parseFile(f);
+        setFiles((prev) =>
+          prev.map((pf) =>
+            pf.file === f ? { ...parsed, status: 'success' as const } : pf
+          )
+        );
+        if (parsed.type === 'excel' && parsed.data?.sheets && parsed.data.sheets.length > 0) {
+          const bestKey = detectBestKeyColumn(parsed.data.sheets[0]);
+          if (bestKey) setAutoKeyColumn(bestKey);
+        }
+      } catch (err) {
+        setFiles((prev) =>
+          prev.map((pf) =>
+            pf.file === f
+              ? { ...pf, status: 'error' as const, errorMsg: err instanceof Error ? err.message : '解析失败' }
+              : pf
+          )
+        );
+      }
     }
-    if (!hasComparableExcel && !hasComparableDoc) {
-      setCompareError('文件类型不匹配：需要至少 2 个同类型文件（Excel 与 Excel 比对，文档与文档比对）');
-      return;
-    }
-    setCompareError(null);
-    setIsAnalyzing(true);
+  }, []);
+
+  const handleCompare = useCallback(async () => {
+    const successFiles = files.filter((f) => f.status === 'success');
+    if (successFiles.length < 2) return;
+
+    setIsComparing(true);
+    setDiffResults([]);
 
     try {
-      const results: AnalysisResult[] = [];
-      let totalAdded = 0;
-      let totalRemoved = 0;
-      let totalModified = 0;
-      let comparisonType: 'excel' | 'document' | 'mixed' = 'mixed';
+      const keyCol = selectedKeyColumn || suggestedKeyColumn || undefined;
 
-      // Excel 表格比对
-      if (excelFiles.length >= 2) {
-        const baseFile = excelFiles[0];
-        for (let i = 1; i < excelFiles.length; i++) {
-          const compareFile = excelFiles[i];
-          const baseSheets = baseFile.data?.sheets || [];
-          const compareSheets = compareFile.data?.sheets || [];
+      // 获取两个文件的 sheet 数据
+      const getSheets = (f: FileWithStatus): SheetData[] => {
+        if (f.type === 'excel' && f.data?.sheets) return f.data.sheets;
+        return [];
+      };
 
-          // 匹配策略：优先同名匹配，找不到时按位置顺序匹配
-          const matchedCompareIndices = new Set<number>();
-          for (const baseSheet of baseSheets) {
-            let matchSheet = compareSheets.find(
-              (s) => s.name === baseSheet.name,
-            );
-            let matchIdx = compareSheets.indexOf(matchSheet!);
-            if (!matchSheet) {
-              // 按位置找第一个未匹配的
-              matchIdx = compareSheets.findIndex((_, idx) => !matchedCompareIndices.has(idx));
-              if (matchIdx >= 0) matchSheet = compareSheets[matchIdx];
-            }
-            if (matchSheet) {
-              matchedCompareIndices.add(matchIdx);
-              const diff = diffSheets(baseSheet, matchSheet, keyColumn || undefined);
-              const namedDiff: SheetDiffResult = {
-                ...diff,
-                sheetName: `${baseFile.name} → ${compareFile.name} / ${diff.sheetName}`,
-              };
-              results.push(namedDiff);
-              totalAdded += diff.addedRows;
-              totalRemoved += diff.removedRows;
-              totalModified += diff.modifiedRows;
-            }
-          }
+      const oldSheets = getSheets(successFiles[0]);
+      const newSheets = getSheets(successFiles[1]);
+
+      if (oldSheets.length === 0 || newSheets.length === 0) {
+        // 文档比对
+        const results: DiffResult[] = [];
+        // 简化处理：只比对第一个 sheet
+        if (oldSheets.length > 0 && newSheets.length > 0) {
+          const result = diffSheets(oldSheets[0], newSheets[0], keyCol);
+          results.push(result);
         }
-      }
-
-      // 文档比对 (Word / PDF)
-      if (docFiles.length >= 2) {
-        const baseFile = docFiles[0];
-        for (let i = 1; i < docFiles.length; i++) {
-          const compareFile = docFiles[i];
-          const baseParas = baseFile.data?.paragraphs || [];
-          const compareParas = compareFile.data?.paragraphs || [];
-
-          const diffItems = diffParagraphs(baseParas, compareParas);
-          const added = diffItems.filter((d) => d.diffType === 'added').length;
-          const removed = diffItems.filter((d) => d.diffType === 'removed').length;
-          const modified = diffItems.filter(
-            (d) => d.diffType === 'modified',
-          ).length;
-
-          const docResult: DocumentDiffResult = {
-            type: 'paragraph',
-            oldFileName: baseFile.name,
-            newFileName: compareFile.name,
-            totalOldParagraphs: baseParas.length,
-            totalNewParagraphs: compareParas.length,
-            added,
-            removed,
-            modified,
-            items: diffItems,
-          };
-          results.push(docResult);
-          totalAdded += added;
-          totalRemoved += removed;
-          totalModified += modified;
-        }
-      }
-
-      if (excelFiles.length >= 2 && docFiles.length === 0) {
-        comparisonType = 'excel';
-      } else if (docFiles.length >= 2 && excelFiles.length === 0) {
-        comparisonType = 'document';
-      }
-
-      const diffCount = totalAdded + totalRemoved + totalModified;
-
-      setDiffResults(results);
-      setSummary({
-        filesCompared: parsedFiles.length,
-        totalDifferences: diffCount,
-        added: totalAdded,
-        removed: totalRemoved,
-        modified: totalModified,
-        comparisonType,
-      });
-      // 自动设置默认主键列（第一个 sheet 的第一个表头）
-      const firstSheet = results.find(
-        (r): r is SheetDiffResult => 'sheetName' in r,
-      );
-      if (firstSheet && firstSheet.headers.length > 0 && !keyColumn) {
-        setKeyColumn(firstSheet.keyColumn || firstSheet.headers[0]);
-      }
-      if (results.length === 0) {
-        const allFileInfo = parsedFiles.map((f) => `${f.name}[类型:${f.type},状态:${f.status}]`).join('、');
-        const excelInfo = excelFiles.length > 0
-          ? `表格：${excelFiles.map((f) => `${f.name}[${f.data?.sheets?.length || 0}个工作表,行:${f.data?.sheets?.[0]?.rows?.length || 0}]`).join('、')}`
-          : '无表格文件';
-        const docInfo = docFiles.length > 0
-          ? `文档：${docFiles.map((f) => `${f.name}[${f.data?.paragraphs?.length || 0}段]`).join('、')}`
-          : '无文档文件';
-        const reasons: string[] = [];
-        if (parsedFiles.length < 2) {
-          reasons.push(`解析成功的文件不足2个（当前${parsedFiles.length}个）`);
-        }
-        if (excelFiles.length < 2 && docFiles.length < 2) {
-          reasons.push(`同类型文件不足2个：表格${excelFiles.length}个，文档${docFiles.length}个`);
-        }
-        if (excelFiles.length >= 2) {
-          const emptySheets = excelFiles.filter((f) => !f.data?.sheets?.length);
-          if (emptySheets.length > 0) {
-            reasons.push(`${emptySheets.length}个表格无有效数据工作表`);
-          } else {
-            const sheetNames = excelFiles.map((f) => (f.data?.sheets || []).map((s) => s.name));
-            const commonSheets = sheetNames[0]?.filter((n) => sheetNames.every((names) => names.includes(n))) || [];
-            if (commonSheets.length === 0) {
-              const allNames = sheetNames.map((names, i) => `文件${i + 1}:[${names.join(',')}]`).join(' ');
-              reasons.push(`表格间没有同名工作表，无法匹配（${allNames}）`);
-            }
-          }
-        }
-        if (docFiles.length >= 2) {
-          const emptyDocs = docFiles.filter((f) => !f.data?.paragraphs?.length);
-          if (emptyDocs.length > 0) reasons.push(`${emptyDocs.length}个文档无有效段落内容`);
-        }
-        const reasonText = reasons.length > 0
-          ? `\n📋 诊断信息：\n• 已解析文件：${allFileInfo || '无'}\n• ${excelInfo}\n• ${docInfo}\n❌ 原因：${reasons.join('；')}`
-          : `\n📋 诊断信息：\n• 已解析文件：${allFileInfo || '无'}\n• ${excelInfo}\n• ${docInfo}`;
-        setCompareError(`未找到可比对的内容${reasonText}`);
+        setDiffResults(results);
       } else {
-        setActiveTab('result');
+        // 表格比对
+        const results: SheetDiffResult[] = [];
+        if (compareMode === 'sheet' && selectedSheet) {
+          const oldSheet = oldSheets.find((s) => s.name === selectedSheet) || oldSheets[0];
+          const newSheet = newSheets.find((s) => s.name === selectedSheet) || newSheets[0];
+          results.push(diffSheets(oldSheet, newSheet, keyCol));
+        } else {
+          // 自动匹配：按 sheet 名称配对
+          const matched = new Set<string>();
+          for (const oldSheet of oldSheets) {
+            const newSheet = newSheets.find((s) => s.name === oldSheet.name && !matched.has(s.name));
+            if (newSheet) {
+              results.push(diffSheets(oldSheet, newSheet, keyCol));
+              matched.add(newSheet.name);
+            }
+          }
+          // 未匹配的 sheet 按顺序配对
+          const unmatchedOld = oldSheets.filter((s) => !matched.has(s.name));
+          const unmatchedNew = newSheets.filter((s) => !matched.has(s.name));
+          for (let i = 0; i < Math.min(unmatchedOld.length, unmatchedNew.length); i++) {
+            results.push(diffSheets(unmatchedOld[i], unmatchedNew[i], keyCol));
+          }
+        }
+        setDiffResults(results);
       }
     } catch (err) {
       console.error('比对失败:', err);
-      setCompareError(err instanceof Error ? `比对失败：${err.message}` : '比对失败，请重试');
     } finally {
-      setIsAnalyzing(false);
+      setIsComparing(false);
     }
-  }, [parsedFiles, excelFiles, docFiles, hasComparableExcel, hasComparableDoc]);
+  }, [files, compareMode, selectedSheet, selectedKeyColumn, suggestedKeyColumn]);
 
-  const handleExport = useCallback(
-    (format: 'xlsx' | 'csv' = 'xlsx') => {
-      if (diffResults.length === 0) return;
+  const handleExport = useCallback(() => {
+    if (diffResults.length === 0) return;
+    const blob = exportToExcel(diffResults);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `比对报告_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [diffResults]);
 
-      try {
-        const workbook = XLSX.utils.book_new();
+  const handleClear = useCallback(() => {
+    setFiles([]);
+    setDiffResults([]);
+    setFilter('all');
+    setSelectedKeyColumn('');
+    setAutoKeyColumn('');
+  }, []);
 
-        // 汇总 sheet
-        if (summary) {
-          const summaryData = [
-            ['文件比对分析报告'],
-            [],
-            ['比对文件数', summary.filesCompared],
-            ['差异总数', summary.totalDifferences],
-            ['新增行数', summary.added],
-            ['删除行数', summary.removed],
-            ['修改行数', summary.modified],
-            ['生成时间', new Date().toLocaleString('zh-CN')],
-          ];
-          const summaryWs = XLSX.utils.aoa_to_sheet(summaryData);
-          XLSX.utils.book_append_sheet(workbook, summaryWs, '分析摘要');
-        }
+  const removeFile = useCallback((file: File) => {
+    setFiles((prev) => prev.filter((f) => f.file !== file));
+  }, []);
 
-        // 每个比对结果一个 sheet
-        diffResults.forEach((result, idx) => {
-          if ('sheetName' in result) {
-            const sheetData: unknown[][] = [];
-            sheetData.push([
-              `工作表: ${result.sheetName}  |  主键列: ${result.keyColumn}`,
-            ]);
-            sheetData.push([
-              `原表行数: ${result.totalOldRows}  |  新表行数: ${result.totalNewRows}`,
-            ]);
-            sheetData.push([
-              `新增: ${result.addedRows}  |  删除: ${result.removedRows}  |  修改: ${result.modifiedRows}  |  不变: ${result.unchangedRows}`,
-            ]);
-            sheetData.push([]);
-
-            const headers = ['行状态', ...result.headers];
-            sheetData.push(headers);
-
-            for (const row of result.rows) {
-              const statusMap: Record<string, string> = {
-                added: '新增',
-                removed: '删除',
-                modified: '修改',
-                unchanged: '不变',
-              };
-              const rowData = [statusMap[row.diffType] || row.diffType];
-              for (const cell of row.cells) {
-                const val = cell.newValue !== undefined ? cell.newValue : cell.oldValue;
-                rowData.push(String(val ?? ''));
-              }
-              sheetData.push(rowData);
-            }
-
-            const ws = XLSX.utils.aoa_to_sheet(sheetData);
-            const sheetName = `比对${idx + 1}_${result.sheetName.substring(0, 20)}`;
-            XLSX.utils.book_append_sheet(workbook, ws, sheetName);
-          } else if ('type' in result) {
-            const sheetData: unknown[][] = [];
-            sheetData.push([
-              `文档比对: ${result.oldFileName} vs ${result.newFileName}`,
-            ]);
-            sheetData.push([
-              `原段落数: ${result.totalOldParagraphs}  |  新段落数: ${result.totalNewParagraphs}`,
-            ]);
-            sheetData.push([
-              `新增: ${result.added}  |  删除: ${result.removed}  |  修改: ${result.modified}`,
-            ]);
-            sheetData.push([]);
-            sheetData.push(['状态', '原文', '新文']);
-
-            for (const item of result.items) {
-              const statusMap: Record<string, string> = {
-                added: '新增',
-                removed: '删除',
-                modified: '修改',
-                unchanged: '不变',
-              };
-              sheetData.push([
-                statusMap[item.diffType] || item.diffType,
-                item.oldText || '',
-                item.newText || '',
-              ]);
-            }
-
-            const ws = XLSX.utils.aoa_to_sheet(sheetData);
-            const sheetName = `文档比对${idx + 1}`;
-            XLSX.utils.book_append_sheet(workbook, ws, sheetName.substring(0, 31));
-          }
-        });
-
-        const fileName = `比对分析结果_${new Date().toISOString().slice(0, 10)}`;
-
-        if (format === 'csv') {
-          const firstSheetName = workbook.SheetNames[0];
-          const firstSheet = workbook.Sheets[firstSheetName];
-          const csv = XLSX.utils.sheet_to_csv(firstSheet);
-          const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `${fileName}.csv`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        } else {
-          XLSX.writeFile(workbook, `${fileName}.xlsx`);
-        }
-      } catch (err) {
-        console.error('导出失败:', err);
-        alert('导出失败，请重试');
-      }
-    },
-    [diffResults, summary],
-  );
-
-  const handleSaveAs = useCallback(() => {
-    void handleExport('xlsx');
-  }, [handleExport]);
-
-  // 概览统计
-  const stats = useMemo(() => {
-    return [
-      { label: '已上传', value: files.length, icon: Upload, color: 'text-blue-600 bg-blue-50' },
-      { label: '解析成功', value: parsedFiles.length, icon: FileSpreadsheet, color: 'text-emerald-600 bg-emerald-50' },
-      { label: '差异总数', value: summary?.totalDifferences || 0, icon: BarChart3, color: 'text-amber-600 bg-amber-50' },
-      { label: 'AI 建议', value: summary ? '已生成' : '待分析', icon: Sparkles, color: 'text-violet-600 bg-violet-50' },
-    ];
-  }, [files.length, parsedFiles.length, summary]);
+  const successFiles = files.filter((f) => f.status === 'success');
+  const canCompare = successFiles.length >= 2;
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-50">
       {/* 顶部导航 */}
-      <header className="sticky top-0 z-50 bg-white border-b border-slate-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-3">
-              <div className="h-9 w-9 rounded-lg bg-gradient-to-br from-slate-700 to-slate-900 flex items-center justify-center">
-                <FileSpreadsheet className="h-5 w-5 text-white" />
-              </div>
-              <div>
-                <h1 className="text-lg font-semibold text-slate-800 leading-tight">
-                  智能文件比对分析平台
-                </h1>
-                <p className="text-xs text-slate-500">
-                  Excel / Word / PDF 多格式比对 · AI 智能分析
-                </p>
-              </div>
+      <header className="sticky top-0 z-50 border-b border-slate-200/80 bg-white/80 backdrop-blur-md">
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-violet-600 to-indigo-600">
+              <ArrowRightLeft className="h-4 w-4 text-white" />
             </div>
-
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void handleExport('xlsx')}
-                disabled={diffResults.length === 0}
-              >
-                <Download className="h-4 w-4 mr-2" />
-                导出
+            <h1 className="text-base font-semibold text-slate-800">智能文件比对分析平台</h1>
+          </div>
+          <div className="flex items-center gap-2">
+            {diffResults.length > 0 && (
+              <Button onClick={handleExport} size="sm" variant="outline" className="text-xs gap-1.5">
+                <Download className="h-3.5 w-3.5" />
+                导出报告
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleSaveAs}
-                disabled={diffResults.length === 0}
-              >
-                <Save className="h-4 w-4 mr-2" />
-                另存为
+            )}
+            {files.length > 0 && (
+              <Button onClick={handleClear} size="sm" variant="ghost" className="text-xs gap-1.5 text-slate-500">
+                <Trash2 className="h-3.5 w-3.5" />
+                清空
               </Button>
-              <Button
-                size="sm"
-                onClick={handleCompare}
-                disabled={!canCompare || isAnalyzing}
-                className="bg-gradient-to-r from-slate-700 to-slate-900 hover:from-slate-800 hover:to-slate-950"
-                title={
-                  !canCompare
-                    ? files.length === 0
-                      ? '请先上传文件'
-                      : `已上传 ${files.length} 个文件，已解析 ${parsedFiles.length} 个，至少需要 2 个可解析文件`
-                    : ''
-                }
-              >
-                <GitCompare className="h-4 w-4 mr-2" />
-                {isAnalyzing ? '分析中...' : '比对分析'}
-              </Button>
-            </div>
+            )}
           </div>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* 错误提示 */}
-        {compareError && (
-          <div className="mb-4 flex items-start gap-2 px-4 py-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">
-            <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
-            <div className="flex-1">{compareError}</div>
-            <button
-              onClick={() => setCompareError(null)}
-              className="text-red-500 hover:text-red-700"
-            >
-              ✕
-            </button>
-          </div>
-        )}
-        {/* 统计卡片 */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-          {stats.map((stat) => (
-            <Card key={stat.label} className="overflow-hidden">
-              <CardContent className="p-4">
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`h-10 w-10 rounded-lg flex items-center justify-center ${stat.color}`}
-                  >
-                    <stat.icon className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <p className="text-xs text-slate-500">{stat.label}</p>
-                    <p className="text-xl font-semibold text-slate-800 tabular-nums">
-                      {stat.value}
-                    </p>
+      <main className="mx-auto max-w-7xl px-4 sm:px-6 py-6 space-y-6">
+        {/* 文件上传区 */}
+        <Card className="border-slate-200 shadow-sm">
+          <CardContent className="pt-5">
+            <FileUpload onFilesAdded={handleFilesAdded} />
+
+            {/* 已上传文件列表 */}
+            {files.length > 0 && (
+              <div className="mt-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-medium text-slate-700">已上传文件 ({files.length})</h3>
+                  <div className="flex items-center gap-2">
+                    <Tabs value={compareMode} onValueChange={(v) => setCompareMode(v as CompareMode)}>
+                      <TabsList className="h-8">
+                        <TabsTrigger value="auto" className="text-xs px-3">自动匹配</TabsTrigger>
+                        <TabsTrigger value="sheet" className="text-xs px-3">指定工作表</TabsTrigger>
+                      </TabsList>
+                    </Tabs>
                   </div>
                 </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
 
-        {/* 提示信息 */}
-        {files.length > 0 && parsedFiles.length < files.length && (
-          <div className="mb-4 flex items-center gap-2 px-4 py-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-sm">
-            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-            <span>部分文件解析中，请等待解析完成后再进行比对分析</span>
-          </div>
-        )}
-
-        {/* 主体内容区 */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* 左侧：上传 & 结果 */}
-          <div className="lg:col-span-2 space-y-6">
-            <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'upload' | 'result')}>
-              <TabsList className="mb-4">
-                <TabsTrigger value="upload" className="flex items-center gap-2">
-                  <Upload className="h-4 w-4" />
-                  文件上传
-                  {files.length > 0 && (
-                    <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-xs">
-                      {files.length}
-                    </Badge>
-                  )}
-                </TabsTrigger>
-                <TabsTrigger value="result" className="flex items-center gap-2">
-                  <FileText className="h-4 w-4" />
-                  分析结果
-                  {diffResults.length > 0 && (
-                    <Badge variant="secondary" className="ml-1 h-5 px-1.5 text-xs">
-                      {diffResults.length}
-                    </Badge>
-                  )}
-                </TabsTrigger>
-              </TabsList>
-
-              <TabsContent value="upload">
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-base flex items-center gap-2">
-                      <Upload className="h-5 w-5 text-slate-600" />
-                      上传文件
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <FileUpload files={files} onFilesChange={setFiles} />
-
-                    {canCompare && (
-                      <div className="mt-4 pt-4 border-t border-slate-100">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <p className="text-sm font-medium text-slate-700">
-                              已就绪 {parsedFiles.length} 个文件
-                              {excelFiles.length >= 2 && (
-                                <span className="ml-2 text-xs text-emerald-600">
-                                  · {excelFiles.length} 个表格可比对
-                                </span>
-                              )}
-                              {docFiles.length >= 2 && (
-                                <span className="ml-2 text-xs text-emerald-600">
-                                  · {docFiles.length} 个文档可比对
-                                </span>
-                              )}
-                            </p>
-                            <p className="text-xs text-slate-500">
-                              点击下方按钮开始比对分析
-                            </p>
-                          </div>
-                          <Button
-                            onClick={handleCompare}
-                            disabled={isAnalyzing || !canActuallyCompare}
-                            className="bg-gradient-to-r from-slate-700 to-slate-900 hover:from-slate-800 hover:to-slate-950"
-                          >
-                            <GitCompare className="h-4 w-4 mr-2" />
-                            {isAnalyzing ? '分析中...' : '开始比对'}
-                          </Button>
-                        </div>
-                      </div>
-                    )}
-
-                    {files.length > 0 && !canCompare && (
-                      <div className="mt-4 pt-4 border-t border-slate-100">
-                        <p className="text-sm text-amber-600">
-                          请至少上传 2 个可解析的文件以进行比对
-                        </p>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              <TabsContent value="result">
-                {/* 差异汇总 */}
-                {summary && diffResults.length > 0 && (
-                  <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-3">
-                    <Card className="border-slate-200 bg-white">
-                      <CardContent className="p-4">
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 rounded-lg bg-slate-100 text-slate-600">
-                            <FilesIcon className="h-5 w-5" />
-                          </div>
-                          <div>
-                            <p className="text-xs text-slate-500">比对文件</p>
-                            <p className="text-xl font-bold text-slate-800 tabular-nums">{summary.filesCompared} 个</p>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                    <Card className="border-emerald-200 bg-emerald-50/50">
-                      <CardContent className="p-4">
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 rounded-lg bg-emerald-100 text-emerald-600">
-                            <TrendingUp className="h-5 w-5" />
-                          </div>
-                          <div>
-                            <p className="text-xs text-emerald-600">新增行</p>
-                            <p className="text-xl font-bold text-emerald-700 tabular-nums">{summary.added}</p>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                    <Card className="border-red-200 bg-red-50/50">
-                      <CardContent className="p-4">
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 rounded-lg bg-red-100 text-red-600">
-                            <TrendingDown className="h-5 w-5" />
-                          </div>
-                          <div>
-                            <p className="text-xs text-red-600">删除行</p>
-                            <p className="text-xl font-bold text-red-700 tabular-nums">{summary.removed}</p>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                    <Card className="border-amber-200 bg-amber-50/50">
-                      <CardContent className="p-4">
-                        <div className="flex items-center gap-3">
-                          <div className="p-2 rounded-lg bg-amber-100 text-amber-600">
-                            <Minus className="h-5 w-5" />
-                          </div>
-                          <div>
-                            <p className="text-xs text-amber-600">修改行</p>
-                            <p className="text-xl font-bold text-amber-700 tabular-nums">{summary.modified}</p>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
+                {compareMode === 'sheet' && allSheets.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-500">选择工作表:</span>
+                    <Select value={selectedSheet} onValueChange={setSelectedSheet}>
+                      <SelectTrigger className="w-48 h-8 text-xs">
+                        <SelectValue placeholder="请选择工作表" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {allSheets.map((s) => (
+                          <SelectItem key={s} value={s}>{s}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 )}
 
-                <Card>
-                  <CardHeader className="pb-2">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <CardTitle className="text-base flex items-center gap-2">
-                        <BarChart3 className="h-5 w-5 text-slate-600" />
-                        比对分析结果
-                        {summary && (
-                          <Badge variant="secondary" className="ml-2 text-xs">
-                            共 {summary.totalDifferences} 处差异
-                          </Badge>
-                        )}
-                      </CardTitle>
-                      {keyColumn && (
-                        <div className="flex items-center gap-2 text-sm">
-                          <span className="text-slate-500 text-xs">主键列：</span>
-                          <select
-                            value={keyColumn}
-                            onChange={(e) => setKeyColumn(e.target.value)}
-                            className="px-2 py-1 text-xs border border-slate-200 rounded-md bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-400"
-                          >
-                            {(() => {
-                              const first = diffResults.find(
-                                (r): r is SheetDiffResult => 'headers' in r,
-                              );
-                              return first?.headers.map((h) => (
-                                <option key={h} value={h}>{h}</option>
-                              ));
-                            })()}
-                          </select>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={handleCompare}
-                            className="h-7 text-xs px-2"
-                          >
-                            <RefreshCw className="h-3 w-3 mr-1" />
-                            重新比对
-                          </Button>
-                        </div>
-                      )}
+                {/* 主键列选择 */}
+                {suggestedKeyColumn && (
+                  <div className="flex items-center gap-2">
+                    <Key className="h-3.5 w-3.5 text-slate-400" />
+                    <span className="text-xs text-slate-500">主键列:</span>
+                    <Select value={selectedKeyColumn || suggestedKeyColumn} onValueChange={setSelectedKeyColumn}>
+                      <SelectTrigger className="w-48 h-8 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(() => {
+                          const excelFile = successFiles.find((f) => f.type === 'excel' && f.data?.sheets);
+                          if (!excelFile?.data?.sheets) return null;
+                          return excelFile.data.sheets[0].headers.map((h) => (
+                            <SelectItem key={h} value={h}>{h}</SelectItem>
+                          ));
+                        })()}
+                      </SelectContent>
+                    </Select>
+                    <span className="text-[10px] text-slate-400">
+                      {selectedKeyColumn ? '手动选择' : '自动识别'}
+                    </span>
+                  </div>
+                )}
+
+                <div className="grid gap-2">
+                  {files.map((f, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5 group hover:border-slate-300 transition-colors"
+                    >
+                      <FileIcon type={f.type} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-slate-700 truncate">{f.name}</p>
+                        <p className="text-xs text-slate-500">
+                          {f.type === 'excel' && f.data?.sheets
+                            ? `${f.data.sheets.length} 个工作表, ${f.data.sheets.reduce((a, s) => a + s.rowCount, 0)} 行数据`
+                            : f.type === 'word' || f.type === 'pdf'
+                            ? `${f.data?.paragraphs?.length ?? 0} 个段落`
+                            : f.type === 'image' ? '图片文件' : '等待解析...'}
+                        </p>
+                      </div>
+                      <FileStatusBadge status={f.status} />
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={() => removeFile(f.file)}
+                      >
+                        <XCircle className="h-3.5 w-3.5 text-slate-400" />
+                      </Button>
                     </div>
-                  </CardHeader>
-                  <CardContent>
-                    <DiffResultView results={diffResults} filter={diffFilter} onFilterChange={setDiffFilter} />
-                  </CardContent>
-                </Card>
-              </TabsContent>
-            </Tabs>
-          </div>
+                  ))}
+                </div>
 
-          {/* 右侧：AI 分析面板 */}
-          <div className="lg:col-span-1">
-            <AIAnalysisPanel
-              files={parsedFiles}
-              diffResults={diffResults}
-              summary={summary}
-              disabled={diffResults.length === 0}
-            />
-          </div>
-        </div>
+                <Button
+                  onClick={handleCompare}
+                  disabled={!canCompare || isComparing}
+                  className="w-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white"
+                >
+                  {isComparing ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      正在比对分析...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="h-4 w-4 mr-2" />
+                      比对分析 ({successFiles.length} 个文件)
+                    </>
+                  )}
+                </Button>
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
-        {/* 底部说明 */}
-        <div className="mt-8 text-center text-xs text-slate-400">
-          <p>支持 Excel (.xlsx, .xls, .csv) · Word (.docx, .doc) · PDF · 图片 等多格式</p>
-          <p className="mt-1">文件仅用于即时分析，不会保存在服务器</p>
-        </div>
+        {/* 结果展示区 */}
+        {diffResults.length > 0 && (
+          <div className="space-y-6">
+            {/* 汇总概览卡片 */}
+            <OverviewCards results={diffResults} />
+
+            {/* 差异详情 */}
+            <Card className="border-slate-200 shadow-sm">
+              <CardContent className="pt-5">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-base font-semibold text-slate-800 flex items-center gap-2">
+                    <ArrowRightLeft className="h-4 w-4 text-violet-600" />
+                    差异详情
+                  </h2>
+                  <div className="flex gap-1.5">
+                    {(['all', 'added', 'removed', 'modified', 'suspected'] as const).map((t) => (
+                      <Badge
+                        key={t}
+                        variant="outline"
+                        className={`cursor-pointer text-xs transition-colors ${
+                          filter === t
+                            ? t === 'added' ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : t === 'removed' ? 'bg-red-50 text-red-700 border-red-200'
+                              : t === 'modified' ? 'bg-amber-50 text-amber-700 border-amber-200'
+                              : t === 'suspected' ? 'bg-blue-50 text-blue-700 border-blue-200'
+                              : 'bg-slate-100 text-slate-800 border-slate-300'
+                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                        onClick={() => setFilter(t)}
+                      >
+                        {t === 'all' ? '全部' : t === 'added' ? '新增' : t === 'removed' ? '删除' : t === 'modified' ? '修改' : '疑似'}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+                <DiffResultView results={diffResults} filter={filter} onFilterChange={setFilter} />
+              </CardContent>
+            </Card>
+
+            {/* AI 分析 */}
+            <AIAnalysisPanel diffResults={diffResults} apiKey={apiKey} onApiKeyChange={setApiKey} />
+          </div>
+        )}
       </main>
     </div>
   );
+}
+
+// ─── 汇总概览卡片 ─────────────────────────────────────────
+
+function OverviewCards({ results }: { results: DiffResult[] }) {
+  const stats = useMemo(() => {
+    let added = 0, removed = 0, modified = 0, suspected = 0, unchanged = 0;
+    for (const r of results) {
+      if ('addedRows' in r) {
+        added += r.addedRows;
+        removed += r.removedRows;
+        modified += r.modifiedRows;
+        suspected += r.suspectedRows ?? 0;
+        unchanged += r.unchangedRows;
+      } else {
+        for (const item of r.items) {
+          if (item.diffType === 'added') added++;
+          else if (item.diffType === 'removed') removed++;
+          else if (item.diffType === 'modified') modified++;
+          else if (item.diffType === 'suspected') suspected++;
+          else unchanged++;
+        }
+      }
+    }
+    return { added, removed, modified, suspected, unchanged };
+  }, [results]);
+
+  const cards = [
+    { label: '新增', value: stats.added, color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200' },
+    { label: '删除', value: stats.removed, color: 'text-red-600', bg: 'bg-red-50', border: 'border-red-200' },
+    { label: '修改', value: stats.modified, color: 'text-amber-600', bg: 'bg-amber-50', border: 'border-amber-200' },
+    { label: '疑似', value: stats.suspected, color: 'text-blue-600', bg: 'bg-blue-50', border: 'border-blue-200' },
+    { label: '未变', value: stats.unchanged, color: 'text-slate-600', bg: 'bg-slate-50', border: 'border-slate-200' },
+  ];
+
+  return (
+    <div className="grid grid-cols-5 gap-3">
+      {cards.map((c) => (
+        <div key={c.label} className={`rounded-xl border ${c.border} ${c.bg} p-3 text-center`}>
+          <div className={`text-xl font-bold tabular-nums ${c.color}`}>{c.value}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{c.label}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── 工具组件 ─────────────────────────────────────────
+
+function FileIcon({ type }: { type: string }) {
+  const iconMap: Record<string, { icon: typeof File; color: string }> = {
+    excel: { icon: FileSpreadsheet, color: 'text-emerald-600' },
+    document: { icon: FileText, color: 'text-blue-600' },
+    word: { icon: FileText, color: 'text-blue-600' },
+    pdf: { icon: FileText, color: 'text-red-600' },
+    image: { icon: ImageIcon, color: 'text-purple-600' },
+  };
+  const { icon: Icon, color } = iconMap[type] || { icon: File, color: 'text-slate-500' };
+  return <Icon className={`h-5 w-5 ${color}`} />;
+}
+
+function FileStatusBadge({ status }: { status: FileStatus }) {
+  switch (status) {
+    case 'parsing':
+      return <Badge variant="secondary" className="text-xs gap-1"><Loader2 className="h-3 w-3 animate-spin" />解析中</Badge>;
+    case 'success':
+      return <Badge variant="secondary" className="text-xs gap-1 bg-emerald-50 text-emerald-700 border-emerald-200"><CheckCircle2 className="h-3 w-3" />已解析</Badge>;
+    case 'error':
+      return <Badge variant="destructive" className="text-xs gap-1"><AlertCircle className="h-3 w-3" />失败</Badge>;
+    default:
+      return <Badge variant="outline" className="text-xs">等待</Badge>;
+  }
 }

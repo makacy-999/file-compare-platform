@@ -16,9 +16,9 @@ export interface UploadedFile {
 
 export interface ParsedData {
   fileName: string;
-  sheets?: SheetData[];          // Excel
-  paragraphs?: ParagraphData[];  // Word / PDF
-  textContent?: string;          // 纯文本
+  sheets?: SheetData[];
+  paragraphs?: ParagraphData[];
+  textContent?: string;
   metadata?: Record<string, string | number | boolean>;
 }
 
@@ -36,8 +36,8 @@ export interface ParagraphData {
   index: number;
 }
 
-// 比对结果类型
-export type DiffType = 'added' | 'removed' | 'modified' | 'unchanged';
+// 比对结果类型 — 'suspected' 表示相似度匹配的疑似同行修改
+export type DiffType = 'added' | 'removed' | 'modified' | 'unchanged' | 'suspected';
 
 export interface CellDiff {
   column: string;
@@ -53,6 +53,15 @@ export interface RowDiff {
   cells: CellDiff[];
   oldRow?: Record<string, unknown>;
   newRow?: Record<string, unknown>;
+  matchReason?: string;
+  similarity?: number;
+}
+
+// 列映射：两侧列名不一致时的映射关系
+export interface ColumnMapping {
+  oldColumn: string;
+  newColumn: string;
+  similarity: number;
 }
 
 export interface SheetDiffResult {
@@ -64,8 +73,22 @@ export interface SheetDiffResult {
   removedRows: number;
   modifiedRows: number;
   unchangedRows: number;
+  suspectedRows: number;
   rows: RowDiff[];
   headers: string[];
+  columnMappings: ColumnMapping[];
+  unmappedOldColumns: string[];
+  unmappedNewColumns: string[];
+  duplicateKeyCount: number;
+  keyColumnScores: KeyScore[];
+}
+
+// 主键候选评分
+export interface KeyScore {
+  column: string;
+  uniqueRatio: number;
+  nullRatio: number;
+  score: number;
 }
 
 export interface DocumentDiffResult {
@@ -97,7 +120,60 @@ export interface AnalysisSummary {
   added: number;
   removed: number;
   modified: number;
+  suspected: number;
+  unchanged: number;
   comparisonType: 'excel' | 'document' | 'mixed';
+}
+
+// 汇总统计类型
+export interface FieldHotspot {
+  column: string;
+  changeCount: number;
+  changeRate: number;
+}
+
+export interface NumericChangeSummary {
+  column: string;
+  oldSum: number;
+  newSum: number;
+  changePercent: number;
+  topChanges: Array<{
+    key: string;
+    oldValue: number;
+    newValue: number;
+    change: number;
+  }>;
+}
+
+export interface DiffStatistics {
+  totalRows: number;
+  addedCount: number;
+  removedCount: number;
+  modifiedCount: number;
+  suspectedCount: number;
+  unchangedCount: number;
+  fieldHotspots: FieldHotspot[];
+  numericSummaries: NumericChangeSummary[];
+ 典型差异: TypicalDiff[];
+}
+
+export interface TypicalDiff {
+  key: string;
+  column: string;
+  oldValue: string;
+  newValue: string;
+  diffType: DiffType;
+}
+
+// 通用比对结果联合类型
+export type DiffResult = SheetDiffResult | DocumentDiffResult;
+
+// 解析后的文件（用于页面状态管理）
+export interface ParsedFile {
+  file: File;
+  name: string;
+  type: FileType;
+  data?: ParsedData;
 }
 
 // AI 分析相关

@@ -1,9 +1,14 @@
 [project]
+sub_id = "bda269cd"
+name = "file-diff-analyzer"
 requires = [ "nodejs-24" ]
 project_type = "web"
 template = "nextjs"
-version = "0.1.5"
+version = "0.0.35"
 appliedPatches = [ ]
+
+[preview]
+preview_enable = "enabled"
 
 [dev]
 build = [ "bash", "./scripts/prepare.sh" ]
@@ -35,6 +40,9 @@ validate_win = [
 ]
 deps = [ "git" ]
 
+[subprojects]
+path = ["."]
+
 [deploy]
 build = [ "bash", "./scripts/build.sh" ]
 build_win = [
@@ -55,3 +63,7 @@ run_win = [
   "./scripts/start.ps1"
 ]
 deps = [ "git" ]
+
+[deploy.profile]
+kind = "service"
+flavor = "web"
