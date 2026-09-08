@@ -372,12 +372,32 @@ function buildUserPrompt(summary: Record<string, unknown>): string {
   const warnings = (summary.warnings || []) as string[];
   const reconciliation = summary.reconciliation as Record<string, unknown> | undefined;
   const matchClassification = summary.matchClassification as Record<string, unknown> | undefined;
+  const matchQuality = summary.matchQuality as Record<string, unknown> | undefined;
+  const crossKeyMapping = summary.crossKeyMapping as Record<string, unknown> | undefined;
 
   if (overview) {
     parts.push(`## 比对概要`);
     parts.push(`- 总行数: ${overview.totalRows}`);
     parts.push(`- 新增: ${overview.added}, 删除: ${overview.removed}, 修改: ${overview.modified}, 疑似配对: ${overview.suspected}, 未变: ${overview.unchanged}`);
     parts.push(`- 变更率: ${(overview.changeRate * 100).toFixed(1)}%`);
+    parts.push('');
+  }
+
+  // 主键映射信息
+  if (matchQuality) {
+    parts.push(`## 主键匹配质量`);
+    const oldKey = matchQuality.oldKey as string;
+    const newKey = matchQuality.newKey as string;
+    const matchedCount = matchQuality.matchedCount as number;
+    const matchRate = matchQuality.matchRate as number;
+    const overlapRatio = matchQuality.overlapRatio as number;
+    const method = matchQuality.method as string;
+    const keyDesc = oldKey === newKey ? `主键列「${oldKey}」` : `A「${oldKey}」↔ B「${newKey}」`;
+    parts.push(`- ${keyDesc}（匹配方式: ${method}，值域重合度: ${(overlapRatio * 100).toFixed(0)}%）`);
+    parts.push(`- 匹配 ${matchedCount} 单，匹配率 ${(matchRate * 100).toFixed(1)}%`);
+    if (matchQuality.warning) {
+      parts.push(`- ⚠️ ${matchQuality.warning}`);
+    }
     parts.push('');
   }
 
@@ -401,13 +421,13 @@ function buildUserPrompt(summary: Record<string, unknown>): string {
   // 匹配分类统计
   if (matchClassification) {
     parts.push(`## 匹配分类统计`);
-    const categories = (matchClassification.categories || []) as Array<{ label: string; recordCount: number; numericSums: Record<string, { oldSum: number; newSum: number }> }>;
-    for (const cat of categories) {
-      parts.push(`- ${cat.label}: ${cat.recordCount} 单`);
-      for (const [col, sums] of Object.entries(cat.numericSums)) {
-        if (cat.label === '两边都有') {
+    const rows = (matchClassification.rows || []) as Array<{ label: string; recordCount: number; numericSums: Record<string, { oldSum: number; newSum: number }> }>;
+    for (const row of rows) {
+      parts.push(`- ${row.label}: ${row.recordCount} 单`);
+      for (const [col, sums] of Object.entries(row.numericSums)) {
+        if (row.label === '两边都有') {
           parts.push(`  - ${col}: A合计 ${sums.oldSum.toLocaleString()} / B合计 ${sums.newSum.toLocaleString()}`);
-        } else if (cat.label === '仅A有') {
+        } else if (row.label === '仅A有') {
           parts.push(`  - ${col}: A合计 ${sums.oldSum.toLocaleString()}`);
         } else {
           parts.push(`  - ${col}: B合计 ${sums.newSum.toLocaleString()}`);

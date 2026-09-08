@@ -32,7 +32,7 @@ export function DiffResultView({ results, filter: externalFilter, onFilterChange
       <div className="flex flex-col items-center justify-center py-16 text-slate-400">
         <Sparkles className="h-12 w-12 mb-4 opacity-50" />
         <p className="text-sm">暂无分析结果</p>
-        <p className="text-xs mt-1">上传文件并点击"比对分析"查看差异</p>
+        <p className="text-xs mt-1">上传文件并点击「比对分析」查看差异</p>
       </div>
     );
   }

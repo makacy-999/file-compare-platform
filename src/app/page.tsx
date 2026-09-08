@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   Upload, FileSpreadsheet, FileText, Image as ImageIcon, File,
   Sparkles, Download, Trash2, AlertCircle, CheckCircle2, XCircle,
@@ -38,6 +38,34 @@ export default function Home() {
   const [oldKeyColumn, setOldKeyColumn] = useState<string>('');
   const [newKeyColumn, setNewKeyColumn] = useState<string>('');
   const [compareError, setCompareError] = useState<string>('');
+
+  // AI 设置持久化
+  const [aiBaseUrl, setAiBaseUrl] = useState('https://api.openai.com/v1');
+  const [aiModel, setAiModel] = useState('gpt-4o-mini');
+  useEffect(() => {
+    const savedKey = localStorage.getItem('ai_api_key');
+    const savedBase = localStorage.getItem('ai_base_url');
+    const savedModel = localStorage.getItem('ai_model');
+    if (savedKey) setApiKey(savedKey);
+    if (savedBase) setAiBaseUrl(savedBase);
+    if (savedModel) setAiModel(savedModel);
+  }, []);
+
+  const saveAISettings = useCallback(() => {
+    localStorage.setItem('ai_api_key', apiKey);
+    localStorage.setItem('ai_base_url', aiBaseUrl);
+    localStorage.setItem('ai_model', aiModel);
+  }, [apiKey, aiBaseUrl, aiModel]);
+
+  // 文件变化时重置主键选择
+  const prevFilesLen = useMemo(() => files.length, [files]);
+  useEffect(() => {
+    if (files.length === 0) {
+      setOldKeyColumn('');
+      setNewKeyColumn('');
+      setAutoKeyColumn('');
+    }
+  }, [files.length]);
 
   const allSheets = useMemo(() => {
     const sheets: string[] = [];
@@ -196,17 +224,21 @@ export default function Home() {
     } finally {
       setIsComparing(false);
     }
-  }, [files, compareMode, selectedSheet, selectedKeyColumn, suggestedKeyColumn]);
+  }, [files, compareMode, selectedSheet, selectedKeyColumn, suggestedKeyColumn, oldKeyColumn, newKeyColumn]);
 
   const handleExport = useCallback(() => {
     if (diffResults.length === 0) return;
-    const blob = exportToExcel(diffResults);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `比对报告_${new Date().toISOString().slice(0, 10)}.xlsx`;
-    a.click();
-    URL.revokeObjectURL(url);
+    try {
+      const blob = exportToExcel(diffResults);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `比对报告_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setCompareError(`导出失败：${err instanceof Error ? err.message : '未知错误'}`);
+    }
   }, [diffResults]);
 
   const handleClear = useCallback(() => {
@@ -293,17 +325,18 @@ export default function Home() {
                 )}
 
                 {/* 主键列选择：A/B 分别选择 */}
-                {suggestedKeyColumn && successFiles.length >= 2 && successFiles[0].type === 'excel' && (
+                {successFiles.length >= 2 && successFiles[0].type === 'excel' && (
                   <div className="space-y-2">
                     <div className="flex items-center gap-2">
                       <Key className="h-3.5 w-3.5 text-slate-400" />
                       <span className="text-xs text-slate-500">A 主键列:</span>
-                      <Select value={oldKeyColumn || suggestedKeyColumn} onValueChange={setOldKeyColumn}>
+                      <Select value={oldKeyColumn || '__auto__'} onValueChange={(v) => setOldKeyColumn(v === '__auto__' ? '' : v)}>
                         <SelectTrigger className="w-44 h-8 text-xs">
-                          <SelectValue />
+                          <SelectValue placeholder="自动识别" />
                         </SelectTrigger>
                         <SelectContent>
-                          {(successFiles[0].data?.sheets?.[0]?.headers ?? []).map((h) => (
+                          <SelectItem value="__auto__">自动识别</SelectItem>
+                          {(successFiles[0]?.data?.sheets?.[0]?.headers ?? []).map((h) => (
                             <SelectItem key={h} value={h}>{h}</SelectItem>
                           ))}
                         </SelectContent>
@@ -312,12 +345,13 @@ export default function Home() {
                     <div className="flex items-center gap-2">
                       <Key className="h-3.5 w-3.5 text-slate-400" />
                       <span className="text-xs text-slate-500">B 主键列:</span>
-                      <Select value={newKeyColumn || suggestedKeyColumn} onValueChange={setNewKeyColumn}>
+                      <Select value={newKeyColumn || '__auto__'} onValueChange={(v) => setNewKeyColumn(v === '__auto__' ? '' : v)}>
                         <SelectTrigger className="w-44 h-8 text-xs">
-                          <SelectValue />
+                          <SelectValue placeholder="自动识别" />
                         </SelectTrigger>
                         <SelectContent>
-                          {(successFiles[1].data?.sheets?.[0]?.headers ?? []).map((h) => (
+                          <SelectItem value="__auto__">自动识别</SelectItem>
+                          {(successFiles[1]?.data?.sheets?.[0]?.headers ?? []).map((h) => (
                             <SelectItem key={h} value={h}>{h}</SelectItem>
                           ))}
                         </SelectContent>
@@ -443,9 +477,20 @@ export default function Home() {
             </Card>
 
             {/* AI 分析 */}
-            <AIAnalysisPanel diffResults={diffResults} apiKey={apiKey} onApiKeyChange={setApiKey} />
+            <AIAnalysisPanel
+              diffResults={diffResults}
+              apiKey={apiKey}
+              onApiKeyChange={setApiKey}
+              apiBase={aiBaseUrl}
+              apiModel={aiModel}
+            />
           </div>
         )}
+
+        {/* 版本标识 */}
+        <footer className="mt-8 pb-6 text-center text-xs text-slate-400">
+          v2.5 · 2026-09-08 · 智能文件比对分析平台
+        </footer>
       </main>
     </div>
   );

@@ -85,6 +85,18 @@ export interface SheetDiffResult {
   reconciliation?: ReconciliationSummary;
   matchClassification?: MatchClassification;
   crossKeyMapping?: CrossKeyMapping;
+  matchQuality?: MatchQuality;
+}
+
+// 主键匹配质量
+export interface MatchQuality {
+  matchedCount: number;
+  matchRate: number;
+  oldKey: string;
+  newKey: string;
+  overlapRatio: number;
+  method: string;
+  warning?: string;
 }
 
 // 主键候选评分
@@ -233,7 +245,7 @@ export interface MatchClassification {
 export interface CrossKeyMapping {
   oldKeyColumn: string;
   newKeyColumn: string;
-  method: 'name' | 'valueOverlap';
+  method: 'name' | 'valueOverlap' | 'auto' | 'manual' | 'partialA' | 'partialB';
   overlapRatio: number;
 }
 

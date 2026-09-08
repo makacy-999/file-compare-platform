@@ -3,8 +3,9 @@ import type {
   DiffType, CellDiff, RowDiff, SheetDiffResult, ColumnMapping, KeyScore,
   FieldHotspot, NumericChangeSummary, DiffStatistics, TypicalDiff,
   DocumentDiffResult, ReconciliationSummary, NumericColumnComparison,
-  MatchClassification, MatchClassificationRow, CrossKeyMapping,
+  MatchClassification, MatchClassificationRow, CrossKeyMapping, MatchQuality,
 } from '@/types';
+import * as XLSX from 'xlsx';
 
 // ─── 基础工具 ─────────────────────────────────────────────
 
@@ -418,6 +419,43 @@ export function diffParagraphs(
   return result;
 }
 
+// ─── 键值归一化 ─────────────────────────────────────────────
+
+function normalizeKeyValue(raw: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  let s = String(raw).trim();
+  // 全角→半角（字母、数字、常见标点）
+  s = s.replace(/[\uff01-\uff5e]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0));
+  s = s.replace(/\u3000/g, ' '); // 全角空格→半角
+  // 去千分位逗号
+  s = s.replace(/,/g, '');
+  // 大小写统一
+  s = s.toUpperCase();
+  // 数值型去前导零（保留 "0" 本身）
+  if (/^-?\d+(\.\d+)?$/.test(s)) {
+    s = String(Number(s));
+  }
+  return s;
+}
+
+// 找到与指定列值域重合度最高的目标 sheet 列
+function findBestOverlapColumn(
+  sourceCol: string,
+  sourceRows: Record<string, unknown>[],
+  targetSheet: SheetData,
+): { column: string; overlapRatio: number } {
+  let bestCol = targetSheet.headers[0] || sourceCol;
+  let bestOverlap = 0;
+  for (const col of targetSheet.headers) {
+    const overlap = computeValueOverlap(sourceCol, col, sourceRows, targetSheet.rows);
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      bestCol = col;
+    }
+  }
+  return { column: bestCol, overlapRatio: bestOverlap };
+}
+
 // ─── 核心：智能表格比对引擎 ─────────────────────────────────
 
 const SUSPECTED_THRESHOLD = 0.85;
@@ -432,26 +470,48 @@ export function diffSheets(
   const allHeaders = [...new Set([...oldSheet.headers, ...newSheet.headers])];
   const keyScores = analyzeKeyColumns(oldSheet.headers.length > 0 ? oldSheet : newSheet);
 
-  // 跨列主键检测
+  // ─── 跨列主键检测（始终执行，除非用户两侧都明确指定） ───
   let crossKeyMapping: CrossKeyMapping | undefined;
   let oldKey: string;
   let newKey: string;
+  let method: CrossKeyMapping['method'] = 'auto';
 
-  if (oldKeyColumn && newKeyColumn && oldKeyColumn !== newKeyColumn) {
-    // 用户明确指定了不同的 A/B 主键列
+  if (oldKeyColumn && newKeyColumn) {
+    // 用户两侧都明确指定
     oldKey = oldKeyColumn;
     newKey = newKeyColumn;
-    const overlap = computeValueOverlap(oldKey, newKey, oldSheet.rows, newSheet.rows);
-    crossKeyMapping = { oldKeyColumn: oldKey, newKeyColumn: newKey, method: 'valueOverlap', overlapRatio: overlap };
+    method = 'manual';
+  } else if (oldKeyColumn && !newKeyColumn) {
+    // 用户只指定了 A 侧，用值域重合找 B 侧
+    oldKey = oldKeyColumn;
+    const overlap = findBestOverlapColumn(oldKey, oldSheet.rows, newSheet);
+    newKey = overlap.column;
+    method = 'partialA';
+  } else if (!oldKeyColumn && newKeyColumn) {
+    // 用户只指定了 B 侧，用值域重合找 A 侧
+    newKey = newKeyColumn;
+    const overlap = findBestOverlapColumn(newKey, newSheet.rows, oldSheet);
+    oldKey = overlap.column;
+    method = 'partialB';
   } else {
-    const detected = keyColumn
-      ? { oldKey: keyColumn, newKey: keyColumn, method: 'name' as const, overlapRatio: 1 }
-      : detectCrossKeyMapping(oldSheet, newSheet);
+    // 自动模式：始终执行跨列检测
+    const detected = detectCrossKeyMapping(oldSheet, newSheet);
     oldKey = detected.oldKey;
     newKey = detected.newKey;
-    if (oldKey !== newKey) {
-      crossKeyMapping = { oldKeyColumn: oldKey, newKeyColumn: newKey, method: detected.method, overlapRatio: detected.overlapRatio };
-    }
+    method = detected.method;
+  }
+
+  // ─── 主键列存在性校验 ───
+  if (!oldSheet.headers.includes(oldKey)) {
+    throw new Error(`主键列「${oldKey}」在文件A中不存在（可用列：${oldSheet.headers.join('、')}），请重新选择主键`);
+  }
+  if (!newSheet.headers.includes(newKey)) {
+    throw new Error(`主键列「${newKey}」在文件B中不存在（可用列：${newSheet.headers.join('、')}），请重新选择主键`);
+  }
+
+  if (oldKey !== newKey) {
+    const overlap = computeValueOverlap(oldKey, newKey, oldSheet.rows, newSheet.rows);
+    crossKeyMapping = { oldKeyColumn: oldKey, newKeyColumn: newKey, method, overlapRatio: overlap };
   }
 
   const displayKey = oldKey; // 展示用主键名（优先用 A 侧列名）
@@ -460,15 +520,15 @@ export function diffSheets(
   const { mappings: columnMappings, unmappedOld, unmappedNew } = mapColumns(oldSheet.headers, newSheet.headers);
   const displayHeaders = allHeaders;
 
-  // 复合键处理：统计主键重复
+  // 复合键处理：统计主键重复（使用归一化键值）
   const oldKeyCounts = new Map<string, number>();
   const newKeyCounts = new Map<string, number>();
   for (const row of oldSheet.rows) {
-    const k = String(row[oldKey] ?? '').trim();
+    const k = normalizeKeyValue(row[oldKey]);
     oldKeyCounts.set(k, (oldKeyCounts.get(k) || 0) + 1);
   }
   for (const row of newSheet.rows) {
-    const k = String(row[newKey] ?? '').trim();
+    const k = normalizeKeyValue(row[newKey]);
     newKeyCounts.set(k, (newKeyCounts.get(k) || 0) + 1);
   }
   const duplicateKeys = new Set<string>();
@@ -476,7 +536,7 @@ export function diffSheets(
   for (const [k, c] of newKeyCounts) { if (c > 1) duplicateKeys.add(k); }
   const duplicateKeyCount = duplicateKeys.size;
 
-  // 构建复合键索引
+  // 构建复合键索引（使用归一化键值）
   const buildCompositeMap = (
     rows: Record<string, unknown>[],
     keyCounts: Map<string, number>,
@@ -485,7 +545,7 @@ export function diffSheets(
     const map = new Map<string, Record<string, unknown>[]>();
     const counter = new Map<string, number>();
     for (const row of rows) {
-      const rawKey = String(row[keyCol] ?? '').trim();
+      const rawKey = normalizeKeyValue(row[keyCol]);
       const total = keyCounts.get(rawKey) || 1;
       const idx = (counter.get(rawKey) || 0) + 1;
       counter.set(rawKey, idx);
@@ -641,6 +701,23 @@ export function diffSheets(
   const reconciliation = computeReconciliationSummary(oldSheet, newSheet, oldKey, newKey, columnMappings);
   const matchClassification = computeMatchClassification(rows, oldKey, newKey, columnMappings);
 
+  // 匹配质量统计
+  const matchedCount = unchanged + modified + suspected;
+  const minRows = Math.min(oldSheet.rowCount, newSheet.rowCount) || 1;
+  const matchRate = matchedCount / minRows;
+  const overlapRatio = crossKeyMapping?.overlapRatio ?? 0;
+  const matchQuality: MatchQuality = {
+    matchedCount,
+    matchRate,
+    oldKey,
+    newKey,
+    overlapRatio,
+    method: crossKeyMapping?.method || method,
+  };
+  if (matchRate < 0.1) {
+    matchQuality.warning = `主键匹配率过低（${(matchRate * 100).toFixed(1)}%），请检查主键列选择是否正确`;
+  }
+
   return {
     sheetName: newSheet.name || oldSheet.name,
     keyColumn: displayKey,
@@ -662,6 +739,7 @@ export function diffSheets(
     reconciliation,
     matchClassification,
     crossKeyMapping,
+    matchQuality,
   };
 }
 
@@ -1115,7 +1193,7 @@ export function detectBestKeyColumn(sheet: SheetData): string {
 // ─── 导出 Excel ─────────────────────────────────────────
 
 export function exportToExcel(results: Array<SheetDiffResult | DocumentDiffResult>): Blob {
-  const { utils, write } = require('xlsx') as typeof import('xlsx');
+  const { utils, write } = XLSX;
   const wb = utils.book_new();
 
   for (const result of results) {
@@ -1264,7 +1342,7 @@ export function buildDiffSummary(results: Array<SheetDiffResult | DocumentDiffRe
       if (sr.matchClassification) {
         const mc = sr.matchClassification;
         matchClassification = {
-          categories: mc.rows.map((row) => ({
+          rows: mc.rows.map((row) => ({
             label: row.label, recordCount: row.recordCount,
             numericSums: row.numericSums,
           })),
@@ -1284,6 +1362,24 @@ export function buildDiffSummary(results: Array<SheetDiffResult | DocumentDiffRe
 
   const changeRate = totalRows > 0 ? (added + removed + modified + suspected) / totalRows : 0;
 
+  // 提取 matchQuality 和 crossKeyMapping
+  const firstSheetResult = results.find((r) => 'sheetName' in r) as SheetDiffResult | undefined;
+  const matchQuality = firstSheetResult?.matchQuality ? {
+    matchedCount: firstSheetResult.matchQuality.matchedCount,
+    matchRate: firstSheetResult.matchQuality.matchRate,
+    oldKey: firstSheetResult.matchQuality.oldKey,
+    newKey: firstSheetResult.matchQuality.newKey,
+    overlapRatio: firstSheetResult.matchQuality.overlapRatio,
+    method: firstSheetResult.matchQuality.method,
+    warning: firstSheetResult.matchQuality.warning,
+  } : undefined;
+  const crossKeyMapping = firstSheetResult?.crossKeyMapping ? {
+    oldKeyColumn: firstSheetResult.crossKeyMapping.oldKeyColumn,
+    newKeyColumn: firstSheetResult.crossKeyMapping.newKeyColumn,
+    method: firstSheetResult.crossKeyMapping.method,
+    overlapRatio: firstSheetResult.crossKeyMapping.overlapRatio,
+  } : undefined;
+
   return {
     overview: { totalRows, added, removed, modified, suspected, unchanged, changeRate },
     fieldHotspots,
@@ -1292,6 +1388,8 @@ export function buildDiffSummary(results: Array<SheetDiffResult | DocumentDiffRe
     warnings,
     reconciliation,
     matchClassification,
+    matchQuality,
+    crossKeyMapping,
   };
 }
 
@@ -1305,8 +1403,20 @@ export function generateLocalAnalysis(summary: Record<string, unknown>): string 
   const warnings = (summary.warnings || []) as string[];
   const reconciliation = summary.reconciliation as Record<string, unknown> | undefined;
   const matchClassification = summary.matchClassification as Record<string, unknown> | undefined;
+  const matchQuality = summary.matchQuality as Record<string, unknown> | undefined;
 
   const sections: string[] = [];
+
+  // 主键匹配质量
+  if (matchQuality) {
+    const oldKey = matchQuality.oldKey as string;
+    const newKey = matchQuality.newKey as string;
+    const matchedCount = matchQuality.matchedCount as number;
+    const matchRate = matchQuality.matchRate as number;
+    const keyDesc = oldKey === newKey ? `主键列「${oldKey}」` : `A「${oldKey}」↔ B「${newKey}」`;
+    sections.push(`【主键匹配】${keyDesc}，匹配 ${matchedCount} 单，匹配率 ${(matchRate * 100).toFixed(1)}%${matchQuality.warning ? '。⚠️ ' + matchQuality.warning : ''}`);
+    sections.push('');
+  }
 
   // 变更概览
   sections.push('【变更概览】');
@@ -1325,19 +1435,19 @@ export function generateLocalAnalysis(summary: Record<string, unknown>): string 
   // 差异量化拆解
   sections.push('【重点风险 — 差异量化拆解】');
   if (matchClassification) {
-    const categories = (matchClassification.categories || []) as Array<{ label: string; recordCount: number; numericSums: Record<string, { oldSum: number; newSum: number }> }>;
-    for (const cat of categories) {
+    const rows = (matchClassification.rows || []) as Array<{ label: string; recordCount: number; numericSums: Record<string, { oldSum: number; newSum: number }> }>;
+    for (const row of rows) {
       const sumParts: string[] = [];
-      for (const [col, sums] of Object.entries(cat.numericSums)) {
-        if (cat.label === '两边都有') {
+      for (const [col, sums] of Object.entries(row.numericSums)) {
+        if (row.label === '两边都有') {
           sumParts.push(`${col} A:${sums.oldSum.toLocaleString()}/B:${sums.newSum.toLocaleString()}`);
-        } else if (cat.label === '仅A有') {
+        } else if (row.label === '仅A有') {
           sumParts.push(`${col} A:${sums.oldSum.toLocaleString()}`);
         } else {
           sumParts.push(`${col} B:${sums.newSum.toLocaleString()}`);
         }
       }
-      sections.push(`• ${cat.label}: ${cat.recordCount} 单${sumParts.length > 0 ? '（' + sumParts.join('，') + '）' : ''}`);
+      sections.push(`• ${row.label}: ${row.recordCount} 单${sumParts.length > 0 ? '（' + sumParts.join('，') + '）' : ''}`);
     }
     const inconsistentCount = matchClassification.inconsistentCount as number;
     if (inconsistentCount > 0) {
@@ -1348,8 +1458,8 @@ export function generateLocalAnalysis(summary: Record<string, unknown>): string 
       const ncs = (reconciliation.numericComparisons || []) as Array<{ column: string; diff: number }>;
       for (const nc of ncs) {
         if (Math.abs(nc.diff) < 0.01) continue;
-        const onlyOld = categories.find((c) => c.label === '仅A有');
-        const onlyNew = categories.find((c) => c.label === '仅B有');
+        const onlyOld = rows.find((r) => r.label === '仅A有');
+        const onlyNew = rows.find((r) => r.label === '仅B有');
         const onlyOldSum = onlyOld?.numericSums[nc.column]?.oldSum ?? 0;
         const onlyNewSum = onlyNew?.numericSums[nc.column]?.newSum ?? 0;
         const bothDiff = nc.diff - onlyNewSum + onlyOldSum;
