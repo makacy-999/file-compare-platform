@@ -349,14 +349,14 @@ function parseAnalysisSections(content: string): Array<{ title: string; content:
 // ─── Prompt 构建 ─────────────────────────────────────────────
 
 function buildSystemPrompt(): string {
-  return `你是一位专业的数据比对分析师。用户会提供一份结构化的文件差异比对摘要，请你基于这些数据进行深度分析。
+  return `你是一位专业的物流对账与数据比对分析师。用户会提供一份结构化的文件差异比对摘要，包含对账汇总数据。请你基于这些数据进行深度分析。
 
 请严格按以下四个分块输出，每块用【】标注标题：
 
-【变更概览】用 2-3 句话概括整体变更规模、影响范围和变更集中方向。
-【重点风险】列出需要重点关注的高风险变更，如金额大额变动、关键字段缺失、主键异常等。
-【数据质量观察】指出数据格式不一致、主键重复、空值异常等质量问题。
-【后续建议】给出 3-5 条具体可执行的后续操作建议。
+【变更概览】用 2-3 句话概括整体变更规模、影响范围。如有对账数据，先说明两文件行数差异和数值列合计差异。
+【重点风险】列出需要重点关注的高风险变更，如金额大额变动、关键字段缺失、主键异常等。如有对账数据，分析差异量化拆解（仅B有/仅A有/两边都有但数值不同，各自贡献的差值与占比）。
+【数据质量观察】指出数据格式不一致、主键重复、空值异常等质量问题。推断可能的业务原因（如重复提交、漏单、数据时点差异、单票数量录入差异）。
+【后续建议】给出 3-5 条具体可执行的核查建议，按优先级列出建议核对的明细范围与单号。
 
 要求：分析要基于数据事实，不要编造；数字要准确；建议要具体可操作。`;
 }
@@ -370,6 +370,8 @@ function buildUserPrompt(summary: Record<string, unknown>): string {
   const numericSummaries = (summary.numericSummaries || []) as Array<{ column: string; oldSum: number; newSum: number; changePercent: number }>;
   const typicalExamples = (summary.typicalExamples || []) as Array<{ key: string; column: string; oldValue: string; newValue: string; type: string }>;
   const warnings = (summary.warnings || []) as string[];
+  const reconciliation = summary.reconciliation as Record<string, unknown> | undefined;
+  const matchClassification = summary.matchClassification as Record<string, unknown> | undefined;
 
   if (overview) {
     parts.push(`## 比对概要`);
@@ -377,6 +379,70 @@ function buildUserPrompt(summary: Record<string, unknown>): string {
     parts.push(`- 新增: ${overview.added}, 删除: ${overview.removed}, 修改: ${overview.modified}, 疑似配对: ${overview.suspected}, 未变: ${overview.unchanged}`);
     parts.push(`- 变更率: ${(overview.changeRate * 100).toFixed(1)}%`);
     parts.push('');
+  }
+
+  // 对账汇总
+  if (reconciliation) {
+    parts.push(`## 对账汇总`);
+    parts.push(`- 文件A: ${reconciliation.oldFileName}，${reconciliation.oldRowCount} 单`);
+    parts.push(`- 文件B: ${reconciliation.newFileName}，${reconciliation.newRowCount} 单`);
+    parts.push(`- 行数差: ${reconciliation.rowDiff} 单`);
+    const ncs = (reconciliation.numericComparisons || []) as Array<{ column: string; oldSum: number; newSum: number; diff: number }>;
+    if (ncs.length > 0) {
+      parts.push(`- 数值列对比:`);
+      for (const nc of ncs) {
+        const match = Math.abs(nc.diff) < 0.01 ? '✅ 一致' : `差 ${nc.diff.toLocaleString()}`;
+        parts.push(`  - ${nc.column}: A合计 ${nc.oldSum.toLocaleString()} vs B合计 ${nc.newSum.toLocaleString()}，${match}`);
+      }
+    }
+    parts.push('');
+  }
+
+  // 匹配分类统计
+  if (matchClassification) {
+    parts.push(`## 匹配分类统计`);
+    const categories = (matchClassification.categories || []) as Array<{ label: string; recordCount: number; numericSums: Record<string, { oldSum: number; newSum: number }> }>;
+    for (const cat of categories) {
+      parts.push(`- ${cat.label}: ${cat.recordCount} 单`);
+      for (const [col, sums] of Object.entries(cat.numericSums)) {
+        if (cat.label === '两边都有') {
+          parts.push(`  - ${col}: A合计 ${sums.oldSum.toLocaleString()} / B合计 ${sums.newSum.toLocaleString()}`);
+        } else if (cat.label === '仅A有') {
+          parts.push(`  - ${col}: A合计 ${sums.oldSum.toLocaleString()}`);
+        } else {
+          parts.push(`  - ${col}: B合计 ${sums.newSum.toLocaleString()}`);
+        }
+      }
+    }
+    const inconsistentCount = matchClassification.inconsistentCount as number;
+    if (inconsistentCount > 0) {
+      parts.push(`- 两边都有但数值不一致: ${inconsistentCount} 单`);
+    }
+    parts.push('');
+
+    // 差异最大的 Top20 单
+    const topDiffs = (matchClassification.topDiffs || []) as Array<{ key: string; column: string; oldValue: number; newValue: number; diff: number }>;
+    if (topDiffs.length > 0) {
+      parts.push(`## 差异最大的单据 Top${topDiffs.length}`);
+      for (const td of topDiffs.slice(0, 10)) {
+        parts.push(`- 单号 ${td.key}，${td.column}: A=${td.oldValue} → B=${td.newValue}，差 ${td.diff}`);
+      }
+      parts.push('');
+    }
+
+    // 仅A/仅B的单号样例
+    const onlyOldKeys = (matchClassification.onlyOldSampleKeys || []) as string[];
+    const onlyNewKeys = (matchClassification.onlyNewSampleKeys || []) as string[];
+    if (onlyOldKeys.length > 0) {
+      parts.push(`## 仅A有的单号样例（前${onlyOldKeys.length}个）`);
+      parts.push(onlyOldKeys.join('、'));
+      parts.push('');
+    }
+    if (onlyNewKeys.length > 0) {
+      parts.push(`## 仅B有的单号样例（前${onlyNewKeys.length}个）`);
+      parts.push(onlyNewKeys.join('、'));
+      parts.push('');
+    }
   }
 
   if (warnings.length > 0) {

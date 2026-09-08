@@ -14,8 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { FileUpload } from '@/components/file-upload';
 import { DiffResultView } from '@/components/diff-result-view';
 import { AIAnalysisPanel } from '@/components/ai-analysis-panel';
-import { parseFile, diffSheets, diffParagraphs, exportToExcel, detectBestKeyColumn } from '@/lib/file-utils';
-import type { ParsedFile, DiffResult, DiffType, SheetData, SheetDiffResult, DocumentDiffResult } from '@/types';
+import { parseFile, diffSheets, diffParagraphs, exportToExcel, detectBestKeyColumn, detectCrossKeyMapping } from '@/lib/file-utils';
+import type { ParsedFile, DiffResult, DiffType, SheetData, SheetDiffResult, DocumentDiffResult, ReconciliationSummary, MatchClassification } from '@/types';
 
 type CompareMode = 'auto' | 'sheet';
 type FileStatus = 'idle' | 'parsing' | 'success' | 'error';
@@ -35,6 +35,8 @@ export default function Home() {
   const [apiKey, setApiKey] = useState('');
   const [selectedKeyColumn, setSelectedKeyColumn] = useState<string>('');
   const [autoKeyColumn, setAutoKeyColumn] = useState<string>('');
+  const [oldKeyColumn, setOldKeyColumn] = useState<string>('');
+  const [newKeyColumn, setNewKeyColumn] = useState<string>('');
   const [compareError, setCompareError] = useState<string>('');
 
   const allSheets = useMemo(() => {
@@ -114,6 +116,8 @@ export default function Home() {
 
       if (isExcelA && isExcelB) {
         const keyCol = selectedKeyColumn || suggestedKeyColumn || undefined;
+        const oldKeyCol = oldKeyColumn || undefined;
+        const newKeyCol = newKeyColumn || undefined;
         const oldSheets = fileA.data?.sheets ?? [];
         const newSheets = fileB.data?.sheets ?? [];
 
@@ -132,22 +136,31 @@ export default function Home() {
         if (compareMode === 'sheet' && selectedSheet) {
           const oldSheet = oldSheets.find((s) => s.name === selectedSheet) || oldSheets[0];
           const newSheet = newSheets.find((s) => s.name === selectedSheet) || newSheets[0];
-          results.push(diffSheets(oldSheet, newSheet, keyCol));
+          results.push(diffSheets(oldSheet, newSheet, keyCol, oldKeyCol, newKeyCol));
         } else {
           const matched = new Set<string>();
           for (const oldSheet of oldSheets) {
             const newSheet = newSheets.find((s) => s.name === oldSheet.name && !matched.has(s.name));
             if (newSheet) {
-              results.push(diffSheets(oldSheet, newSheet, keyCol));
+              results.push(diffSheets(oldSheet, newSheet, keyCol, oldKeyCol, newKeyCol));
               matched.add(newSheet.name);
             }
           }
           const unmatchedOld = oldSheets.filter((s) => !matched.has(s.name));
           const unmatchedNew = newSheets.filter((s) => !matched.has(s.name));
           for (let i = 0; i < Math.min(unmatchedOld.length, unmatchedNew.length); i++) {
-            results.push(diffSheets(unmatchedOld[i], unmatchedNew[i], keyCol));
+            results.push(diffSheets(unmatchedOld[i], unmatchedNew[i], keyCol, oldKeyCol, newKeyCol));
           }
         }
+
+        // 填充文件名到对账汇总
+        for (const r of results) {
+          if (r.reconciliation) {
+            r.reconciliation.oldFileName = fileA.name;
+            r.reconciliation.newFileName = fileB.name;
+          }
+        }
+
         setDiffResults(results);
       } else if (isDocA && isDocB) {
         const oldParas = fileA.data?.paragraphs ?? [];
@@ -202,6 +215,8 @@ export default function Home() {
     setFilter('all');
     setSelectedKeyColumn('');
     setAutoKeyColumn('');
+    setOldKeyColumn('');
+    setNewKeyColumn('');
     setCompareError('');
   }, []);
 
@@ -277,28 +292,40 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* 主键列选择 */}
-                {suggestedKeyColumn && (
-                  <div className="flex items-center gap-2">
-                    <Key className="h-3.5 w-3.5 text-slate-400" />
-                    <span className="text-xs text-slate-500">主键列:</span>
-                    <Select value={selectedKeyColumn || suggestedKeyColumn} onValueChange={setSelectedKeyColumn}>
-                      <SelectTrigger className="w-48 h-8 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {(() => {
-                          const excelFile = successFiles.find((f) => f.type === 'excel' && f.data?.sheets);
-                          if (!excelFile?.data?.sheets) return null;
-                          return excelFile.data.sheets[0].headers.map((h) => (
+                {/* 主键列选择：A/B 分别选择 */}
+                {suggestedKeyColumn && successFiles.length >= 2 && successFiles[0].type === 'excel' && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Key className="h-3.5 w-3.5 text-slate-400" />
+                      <span className="text-xs text-slate-500">A 主键列:</span>
+                      <Select value={oldKeyColumn || suggestedKeyColumn} onValueChange={setOldKeyColumn}>
+                        <SelectTrigger className="w-44 h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(successFiles[0].data?.sheets?.[0]?.headers ?? []).map((h) => (
                             <SelectItem key={h} value={h}>{h}</SelectItem>
-                          ));
-                        })()}
-                      </SelectContent>
-                    </Select>
-                    <span className="text-[10px] text-slate-400">
-                      {selectedKeyColumn ? '手动选择' : '自动识别'}
-                    </span>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Key className="h-3.5 w-3.5 text-slate-400" />
+                      <span className="text-xs text-slate-500">B 主键列:</span>
+                      <Select value={newKeyColumn || suggestedKeyColumn} onValueChange={setNewKeyColumn}>
+                        <SelectTrigger className="w-44 h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(successFiles[1].data?.sheets?.[0]?.headers ?? []).map((h) => (
+                            <SelectItem key={h} value={h}>{h}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <span className="text-[10px] text-slate-400">
+                        {oldKeyColumn || newKeyColumn ? '手动指定' : '自动识别（含值域重合检测）'}
+                      </span>
+                    </div>
                   </div>
                 )}
 
@@ -366,6 +393,13 @@ export default function Home() {
           <div className="space-y-6">
             {/* 汇总概览卡片 */}
             <OverviewCards results={diffResults} />
+
+            {/* 对账汇总 */}
+            {(() => {
+              const sheetResult = diffResults.find((r): r is SheetDiffResult => 'reconciliation' in r && !!r.reconciliation);
+              if (!sheetResult?.reconciliation) return null;
+              return <ReconciliationPanel result={sheetResult} />;
+            })()}
 
             {/* 性能保护提示 */}
             {diffResults.some((r) => 'skippedSimilarity' in r && r.skippedSimilarity) && (
@@ -487,4 +521,169 @@ function FileStatusBadge({ status }: { status: FileStatus }) {
     default:
       return <Badge variant="outline" className="text-xs">等待</Badge>;
   }
+}
+
+// ─── 对账汇总面板 ─────────────────────────────────────────
+
+function fmtNum(n: number): string {
+  return n.toLocaleString('zh-CN');
+}
+
+function ReconciliationPanel({ result }: { result: SheetDiffResult }) {
+  const recon = result.reconciliation!;
+  const mc = result.matchClassification;
+
+  return (
+    <div className="space-y-4">
+      {/* 对账汇总卡片 */}
+      <Card className="border-slate-200 shadow-sm">
+        <CardContent className="pt-5">
+          <h2 className="text-base font-semibold text-slate-800 flex items-center gap-2 mb-4">
+            <FileSpreadsheet className="h-4 w-4 text-violet-600" />
+            对账汇总
+          </h2>
+
+          {/* 行数对比 */}
+          <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 mb-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-slate-600">运单数量</span>
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-slate-800">
+                  A「{recon.oldFileName}」{fmtNum(recon.oldRowCount)} 单
+                </span>
+                <span className="text-slate-400">vs</span>
+                <span className="font-medium text-slate-800">
+                  B「{recon.newFileName}」{fmtNum(recon.newRowCount)} 单
+                </span>
+                <span className={`font-semibold ${recon.rowDiff > 0 ? 'text-amber-600' : recon.rowDiff < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                  ，差 {fmtNum(Math.abs(recon.rowDiff))} 单
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* 数值列对比 */}
+          {recon.numericComparisons.map((nc) => {
+            const isMatch = Math.abs(nc.diff) < 0.01;
+            return (
+              <div key={nc.column} className="rounded-lg bg-slate-50 border border-slate-200 p-3 mb-2 last:mb-0">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-600">
+                    {isMatch ? '✅' : '⚠️'} {nc.column}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-slate-800">
+                      A「{recon.oldFileName}」{fmtNum(nc.oldSum)}
+                    </span>
+                    <span className="text-slate-400">vs</span>
+                    <span className="font-medium text-slate-800">
+                      B「{recon.newFileName}」{fmtNum(nc.newSum)}
+                    </span>
+                    {isMatch ? (
+                      <span className="font-semibold text-emerald-600">，一致</span>
+                    ) : (
+                      <span className={`font-semibold ${nc.diff > 0 ? 'text-amber-600' : 'text-red-600'}`}>
+                        ，差 {fmtNum(Math.abs(nc.diff))}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {(nc.oldUnparsed > 0 || nc.newUnparsed > 0) && (
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    已忽略 {nc.oldUnparsed + nc.newUnparsed} 个无法解析的值
+                  </p>
+                )}
+              </div>
+            );
+          })}
+
+          {/* 跨列主键提示 */}
+          {result.crossKeyMapping && (
+            <div className="mt-3 flex items-start gap-2 rounded-lg bg-blue-50 border border-blue-200 px-3 py-2 text-xs text-blue-700">
+              <Key className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span>
+                主键跨列匹配：A「{result.crossKeyMapping.oldKeyColumn}」↔ B「{result.crossKeyMapping.newKeyColumn}」
+                （{result.crossKeyMapping.method === 'valueOverlap'
+                  ? `值域重合度 ${(result.crossKeyMapping.overlapRatio * 100).toFixed(0)}%`
+                  : '列名匹配'}）
+              </span>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 匹配分类统计表 */}
+      {mc && (
+        <Card className="border-slate-200 shadow-sm">
+          <CardContent className="pt-5">
+            <h2 className="text-base font-semibold text-slate-800 flex items-center gap-2 mb-4">
+              <ArrowRightLeft className="h-4 w-4 text-violet-600" />
+              匹配分类统计
+            </h2>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200">
+                    <th className="text-left py-2 px-3 font-medium text-slate-600">分类</th>
+                    <th className="text-right py-2 px-3 font-medium text-slate-600">单数</th>
+                    {mc.numericColumns.map((col) => (
+                      <th key={col} className="text-right py-2 px-3 font-medium text-slate-600">{col}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {mc.rows.map((row) => (
+                    <tr key={row.category} className="border-b border-slate-100 last:border-0">
+                      <td className="py-2 px-3">
+                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${
+                          row.category === 'both' ? 'bg-emerald-50 text-emerald-700'
+                          : row.category === 'onlyOld' ? 'bg-blue-50 text-blue-700'
+                          : 'bg-amber-50 text-amber-700'
+                        }`}>
+                          {row.label}
+                        </span>
+                      </td>
+                      <td className="text-right py-2 px-3 font-medium text-slate-800">{fmtNum(row.recordCount)}</td>
+                      {mc.numericColumns.map((col) => {
+                        const sums = row.numericSums[col];
+                        if (!sums) return <td key={col} className="text-right py-2 px-3 text-slate-400">—</td>;
+                        if (row.category === 'both') {
+                          return (
+                            <td key={col} className="text-right py-2 px-3 text-slate-700">
+                              A: {fmtNum(sums.oldSum)} / B: {fmtNum(sums.newSum)}
+                            </td>
+                          );
+                        }
+                        const val = row.category === 'onlyOld' ? sums.oldSum : sums.newSum;
+                        return (
+                          <td key={col} className="text-right py-2 px-3 text-slate-700">{fmtNum(val)}</td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* 数值不一致统计 */}
+            {mc.inconsistentCount > 0 && (
+              <div className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-700">
+                <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                <span>两边都有但数值不一致的单据：{mc.inconsistentCount} 单</span>
+              </div>
+            )}
+
+            {/* 自洽校验 */}
+            {!mc.selfCheckPassed && (
+              <div className="mt-2 flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+                <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                <span>自洽校验未通过，分类合计与全表合计不一致，请检查数据</span>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
 }

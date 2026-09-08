@@ -82,6 +82,9 @@ export interface SheetDiffResult {
   duplicateKeyCount: number;
   keyColumnScores: KeyScore[];
   skippedSimilarity?: boolean;
+  reconciliation?: ReconciliationSummary;
+  matchClassification?: MatchClassification;
+  crossKeyMapping?: CrossKeyMapping;
 }
 
 // 主键候选评分
@@ -175,6 +178,63 @@ export interface ParsedFile {
   name: string;
   type: FileType;
   data?: ParsedData;
+}
+
+// ─── 对账汇总类型 ─────────────────────────────────────────
+
+// 数值列 A/B 合计对比
+export interface NumericColumnComparison {
+  column: string;
+  oldColumn: string;
+  newColumn: string;
+  oldSum: number;
+  newSum: number;
+  diff: number;
+  oldUnparsed: number;
+  newUnparsed: number;
+}
+
+// 对账汇总卡片数据
+export interface ReconciliationSummary {
+  oldFileName: string;
+  newFileName: string;
+  oldRowCount: number;
+  newRowCount: number;
+  rowDiff: number;
+  numericComparisons: NumericColumnComparison[];
+}
+
+// 匹配分类统计表行
+export interface MatchClassificationRow {
+  category: 'both' | 'onlyOld' | 'onlyNew';
+  label: string;
+  recordCount: number;
+  numericSums: Record<string, { oldSum: number; newSum: number }>;
+}
+
+// 匹配分类统计
+export interface MatchClassification {
+  rows: MatchClassificationRow[];
+  numericColumns: string[];
+  inconsistentCount: number;
+  topDiffs: Array<{
+    key: string;
+    column: string;
+    oldValue: number;
+    newValue: number;
+    diff: number;
+  }>;
+  onlyOldSampleKeys: string[];
+  onlyNewSampleKeys: string[];
+  selfCheckPassed: boolean;
+}
+
+// 跨列主键映射信息
+export interface CrossKeyMapping {
+  oldKeyColumn: string;
+  newKeyColumn: string;
+  method: 'name' | 'valueOverlap';
+  overlapRatio: number;
 }
 
 // AI 分析相关

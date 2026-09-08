@@ -2,7 +2,8 @@ import type {
   FileType, SheetData, ParagraphData, ParsedData, ParagraphDiffItem,
   DiffType, CellDiff, RowDiff, SheetDiffResult, ColumnMapping, KeyScore,
   FieldHotspot, NumericChangeSummary, DiffStatistics, TypicalDiff,
-  DocumentDiffResult,
+  DocumentDiffResult, ReconciliationSummary, NumericColumnComparison,
+  MatchClassification, MatchClassificationRow, CrossKeyMapping,
 } from '@/types';
 
 // ─── 基础工具 ─────────────────────────────────────────────
@@ -80,6 +81,119 @@ function tryParseNumber(val: unknown): number | null {
   if (typeof val !== 'string' || val.trim() === '') return null;
   const n = Number(val);
   return isFinite(n) ? n : null;
+}
+
+// 增强数值解析：容忍千分位逗号、货币符号、空白、常见单位后缀
+export function parseRobustNumber(val: unknown): { num: number | null; unparsed: boolean } {
+  if (val === undefined || val === null) return { num: null, unparsed: false };
+  if (typeof val === 'number' && isFinite(val)) return { num: val, unparsed: false };
+  if (typeof val !== 'string') return { num: null, unparsed: true };
+
+  const trimmed = val.trim();
+  if (trimmed === '' || trimmed === '-' || trimmed === '—') return { num: null, unparsed: false };
+
+  // 去除货币符号、空白、常见单位后缀
+  const cleaned = trimmed
+    .replace(/[¥$€£￥]/g, '')
+    .replace(/\s+/g, '')
+    .replace(/(件|单|个|台|套|箱|包|瓶|kg|KG|Kg|g|G|ml|ML|L|l)$/i, '')
+    .replace(/,$/, '');
+
+  if (cleaned === '' || cleaned === '-') return { num: null, unparsed: false };
+
+  // 去除千分位逗号（如 "1,234,567" → "1234567"）
+  const noCommas = cleaned.replace(/,/g, '');
+  const n = Number(noCommas);
+  if (isFinite(n)) return { num: n, unparsed: false };
+
+  return { num: null, unparsed: true };
+}
+
+// 值域重合度检测：从两列各抽样非空值，计算交集占较小一侧的比例
+export function computeValueOverlap(
+  oldCol: string,
+  newCol: string,
+  oldRows: Record<string, unknown>[],
+  newRows: Record<string, unknown>[],
+  maxSample = 500,
+): number {
+  const extractValues = (rows: Record<string, unknown>[], col: string, max: number): Set<string> => {
+    const vals = new Set<string>();
+    for (let i = 0; i < rows.length && vals.size < max; i++) {
+      const v = rows[i][col];
+      if (v !== undefined && v !== null) {
+        const s = String(v).trim();
+        if (s !== '') vals.add(s);
+      }
+    }
+    return vals;
+  };
+
+  const oldVals = extractValues(oldRows, oldCol, maxSample);
+  const newVals = extractValues(newRows, newCol, maxSample);
+
+  if (oldVals.size === 0 || newVals.size === 0) return 0;
+
+  let intersection = 0;
+  const smaller = oldVals.size <= newVals.size ? oldVals : newVals;
+  const larger = oldVals.size <= newVals.size ? newVals : oldVals;
+  for (const v of smaller) {
+    if (larger.has(v)) intersection++;
+  }
+  return intersection / smaller.size;
+}
+
+// 跨列主键检测：综合列名相似度 + 值域重合度 + 值唯一性评分
+export function detectCrossKeyMapping(
+  oldSheet: SheetData,
+  newSheet: SheetData,
+): { oldKey: string; newKey: string; method: 'name' | 'valueOverlap'; overlapRatio: number } {
+  const oldScores = analyzeKeyColumns(oldSheet);
+  const newScores = analyzeKeyColumns(newSheet);
+
+  // 先尝试同名匹配
+  for (const os of oldScores) {
+    for (const ns of newScores) {
+      if (os.column === ns.column && os.uniqueRatio > 0.5 && ns.uniqueRatio > 0.5) {
+        return { oldKey: os.column, newKey: ns.column, method: 'name', overlapRatio: 1 };
+      }
+    }
+  }
+
+  // 再尝试列名相似度
+  for (const os of oldScores) {
+    for (const ns of newScores) {
+      const nameSim = columnNameSimilarity(os.column, ns.column);
+      if (nameSim >= 0.65 && os.uniqueRatio > 0.3 && ns.uniqueRatio > 0.3) {
+        return { oldKey: os.column, newKey: ns.column, method: 'name', overlapRatio: nameSim };
+      }
+    }
+  }
+
+  // 最后尝试值域重合度
+  let bestOverlap = 0;
+  let bestPair = { oldKey: oldScores[0]?.column || '', newKey: newScores[0]?.column || '' };
+  for (const os of oldScores.slice(0, 5)) {
+    for (const ns of newScores.slice(0, 5)) {
+      const overlap = computeValueOverlap(os.column, ns.column, oldSheet.rows, newSheet.rows);
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        bestPair = { oldKey: os.column, newKey: ns.column };
+      }
+    }
+  }
+
+  if (bestOverlap >= 0.6) {
+    return { oldKey: bestPair.oldKey, newKey: bestPair.newKey, method: 'valueOverlap', overlapRatio: bestOverlap };
+  }
+
+  // fallback: 各取评分最高的列
+  return {
+    oldKey: oldScores[0]?.column || oldSheet.headers[0] || '',
+    newKey: newScores[0]?.column || newSheet.headers[0] || '',
+    method: 'name',
+    overlapRatio: 0,
+  };
 }
 
 export function normalizeValue(val: unknown): { normalized: string; numVal: number | null } {
@@ -312,10 +426,35 @@ export function diffSheets(
   oldSheet: SheetData,
   newSheet: SheetData,
   keyColumn?: string,
+  oldKeyColumn?: string,
+  newKeyColumn?: string,
 ): SheetDiffResult {
   const allHeaders = [...new Set([...oldSheet.headers, ...newSheet.headers])];
   const keyScores = analyzeKeyColumns(oldSheet.headers.length > 0 ? oldSheet : newSheet);
-  const key = selectBestKey(keyScores, keyColumn) || allHeaders[0] || 'id';
+
+  // 跨列主键检测
+  let crossKeyMapping: CrossKeyMapping | undefined;
+  let oldKey: string;
+  let newKey: string;
+
+  if (oldKeyColumn && newKeyColumn && oldKeyColumn !== newKeyColumn) {
+    // 用户明确指定了不同的 A/B 主键列
+    oldKey = oldKeyColumn;
+    newKey = newKeyColumn;
+    const overlap = computeValueOverlap(oldKey, newKey, oldSheet.rows, newSheet.rows);
+    crossKeyMapping = { oldKeyColumn: oldKey, newKeyColumn: newKey, method: 'valueOverlap', overlapRatio: overlap };
+  } else {
+    const detected = keyColumn
+      ? { oldKey: keyColumn, newKey: keyColumn, method: 'name' as const, overlapRatio: 1 }
+      : detectCrossKeyMapping(oldSheet, newSheet);
+    oldKey = detected.oldKey;
+    newKey = detected.newKey;
+    if (oldKey !== newKey) {
+      crossKeyMapping = { oldKeyColumn: oldKey, newKeyColumn: newKey, method: detected.method, overlapRatio: detected.overlapRatio };
+    }
+  }
+
+  const displayKey = oldKey; // 展示用主键名（优先用 A 侧列名）
 
   // 列映射
   const { mappings: columnMappings, unmappedOld, unmappedNew } = mapColumns(oldSheet.headers, newSheet.headers);
@@ -325,11 +464,11 @@ export function diffSheets(
   const oldKeyCounts = new Map<string, number>();
   const newKeyCounts = new Map<string, number>();
   for (const row of oldSheet.rows) {
-    const k = String(row[key] ?? '').trim();
+    const k = String(row[oldKey] ?? '').trim();
     oldKeyCounts.set(k, (oldKeyCounts.get(k) || 0) + 1);
   }
   for (const row of newSheet.rows) {
-    const k = String(row[key] ?? '').trim();
+    const k = String(row[newKey] ?? '').trim();
     newKeyCounts.set(k, (newKeyCounts.get(k) || 0) + 1);
   }
   const duplicateKeys = new Set<string>();
@@ -341,11 +480,12 @@ export function diffSheets(
   const buildCompositeMap = (
     rows: Record<string, unknown>[],
     keyCounts: Map<string, number>,
+    keyCol: string,
   ): Map<string, Record<string, unknown>[]> => {
     const map = new Map<string, Record<string, unknown>[]>();
     const counter = new Map<string, number>();
     for (const row of rows) {
-      const rawKey = String(row[key] ?? '').trim();
+      const rawKey = String(row[keyCol] ?? '').trim();
       const total = keyCounts.get(rawKey) || 1;
       const idx = (counter.get(rawKey) || 0) + 1;
       counter.set(rawKey, idx);
@@ -357,8 +497,8 @@ export function diffSheets(
     return map;
   };
 
-  const oldIndex = buildCompositeMap(oldSheet.rows, oldKeyCounts);
-  const newIndex = buildCompositeMap(newSheet.rows, newKeyCounts);
+  const oldIndex = buildCompositeMap(oldSheet.rows, oldKeyCounts, oldKey);
+  const newIndex = buildCompositeMap(newSheet.rows, newKeyCounts, newKey);
 
   const allKeys = new Set([...oldIndex.keys(), ...newIndex.keys()]);
   const rows: RowDiff[] = [];
@@ -438,7 +578,7 @@ export function diffSheets(
     for (let oi = 0; oi < unmatchedOld.length; oi++) {
       for (let ni = 0; ni < unmatchedNew.length; ni++) {
         const { similarity, reason } = computeRowSimilarity(
-          unmatchedOld[oi].row, unmatchedNew[ni].row, displayHeaders, key,
+          unmatchedOld[oi].row, unmatchedNew[ni].row, displayHeaders, oldKey,
         );
         if (similarity >= SUSPECTED_THRESHOLD) {
           pairScores.push({ oldIdx: oi, newIdx: ni, sim: similarity, reason });
@@ -497,9 +637,13 @@ export function diffSheets(
     rows.push({ rowIndex: rowIndex++, key: unmatchedOld[oi].key, diffType: 'removed', cells, oldRow });
   }
 
+  // 对账汇总
+  const reconciliation = computeReconciliationSummary(oldSheet, newSheet, oldKey, newKey, columnMappings);
+  const matchClassification = computeMatchClassification(rows, oldKey, newKey, columnMappings);
+
   return {
     sheetName: newSheet.name || oldSheet.name,
-    keyColumn: key,
+    keyColumn: displayKey,
     totalOldRows: oldSheet.rowCount,
     totalNewRows: newSheet.rowCount,
     addedRows: added,
@@ -515,6 +659,228 @@ export function diffSheets(
     duplicateKeyCount,
     keyColumnScores: keyScores,
     skippedSimilarity: skipSimilarity || undefined,
+    reconciliation,
+    matchClassification,
+    crossKeyMapping,
+  };
+}
+
+// ─── 对账汇总计算 ─────────────────────────────────────────
+
+export function computeReconciliationSummary(
+  oldSheet: SheetData,
+  newSheet: SheetData,
+  oldKeyCol: string,
+  newKeyCol: string,
+  columnMappings: ColumnMapping[],
+): ReconciliationSummary {
+  // 找出共同的数值列（通过列映射匹配）
+  const numericComparisons: NumericColumnComparison[] = [];
+
+  // 构建列映射对：包括显式映射和同名列
+  const columnPairs: Array<{ oldCol: string; newCol: string }> = [];
+  const mappedNewCols = new Set(columnMappings.map((m) => m.newColumn));
+  for (const m of columnMappings) {
+    columnPairs.push({ oldCol: m.oldColumn, newCol: m.newColumn });
+  }
+  // 同名列但未在映射中的也加入
+  for (const oldCol of oldSheet.headers) {
+    if (columnPairs.some((p) => p.oldCol === oldCol)) continue;
+    if (newSheet.headers.includes(oldCol) && !mappedNewCols.has(oldCol)) {
+      columnPairs.push({ oldCol, newCol: oldCol });
+    }
+  }
+
+  // 对每对列检查是否为数值列并计算合计
+  for (const { oldCol, newCol } of columnPairs) {
+    let oldSum = 0, newSum = 0;
+    let oldUnparsed = 0, newUnparsed = 0;
+    let isNumeric = false;
+
+    for (const row of oldSheet.rows) {
+      const { num, unparsed } = parseRobustNumber(row[oldCol]);
+      if (num !== null) { oldSum += num; isNumeric = true; }
+      if (unparsed) oldUnparsed++;
+    }
+    for (const row of newSheet.rows) {
+      const { num, unparsed } = parseRobustNumber(row[newCol]);
+      if (num !== null) { newSum += num; isNumeric = true; }
+      if (unparsed) newUnparsed++;
+    }
+
+    if (isNumeric) {
+      numericComparisons.push({
+        column: oldCol === newCol ? oldCol : `${oldCol} ≈ ${newCol}`,
+        oldColumn: oldCol,
+        newColumn: newCol,
+        oldSum,
+        newSum,
+        diff: newSum - oldSum,
+        oldUnparsed,
+        newUnparsed,
+      });
+    }
+  }
+
+  return {
+    oldFileName: '',
+    newFileName: '',
+    oldRowCount: oldSheet.rowCount,
+    newRowCount: newSheet.rowCount,
+    rowDiff: newSheet.rowCount - oldSheet.rowCount,
+    numericComparisons,
+  };
+}
+
+// ─── 匹配分类统计 ─────────────────────────────────────────
+
+export function computeMatchClassification(
+  rows: RowDiff[],
+  oldKeyCol: string,
+  newKeyCol: string,
+  columnMappings: ColumnMapping[],
+): MatchClassification {
+  // 分类统计
+  const bothRows = rows.filter((r) => r.diffType === 'modified' || r.diffType === 'unchanged');
+  const onlyOldRows = rows.filter((r) => r.diffType === 'removed');
+  const onlyNewRows = rows.filter((r) => r.diffType === 'added');
+
+  // 找出共同数值列
+  const columnPairs: Array<{ oldCol: string; newCol: string; displayCol: string }> = [];
+  const mappedNewCols = new Set(columnMappings.map((m) => m.newColumn));
+  for (const m of columnMappings) {
+    columnPairs.push({ oldCol: m.oldColumn, newCol: m.newColumn, displayCol: m.oldColumn === m.newColumn ? m.oldColumn : `${m.oldColumn} ≈ ${m.newColumn}` });
+  }
+  // 同名列补充
+  const allOldCols = new Set(rows.flatMap((r) => r.cells.map((c) => c.column)));
+  for (const col of allOldCols) {
+    if (columnPairs.some((p) => p.oldCol === col || p.newCol === col)) continue;
+    columnPairs.push({ oldCol: col, newCol: col, displayCol: col });
+  }
+
+  // 计算每个分类的数值合计
+  const sumNumeric = (
+    targetRows: RowDiff[],
+    side: 'old' | 'new',
+    colPair: { oldCol: string; newCol: string },
+  ): { sum: number; unparsed: number } => {
+    let sum = 0, unparsed = 0;
+    for (const row of targetRows) {
+      const col = side === 'old' ? colPair.oldCol : colPair.newCol;
+      const cell = row.cells.find((c) => c.column === col);
+      const val = cell ? (side === 'old' ? cell.oldValue : cell.newValue) : undefined;
+      const { num, unparsed: u } = parseRobustNumber(val);
+      if (num !== null) sum += num;
+      if (u) unparsed++;
+    }
+    return { sum, unparsed };
+  };
+
+  const numericColumns = columnPairs.map((p) => p.displayCol);
+  const matchRows: MatchClassificationRow[] = [
+    {
+      category: 'both',
+      label: '两边都有',
+      recordCount: bothRows.length,
+      numericSums: Object.fromEntries(
+        columnPairs.map((p) => {
+          const oldS = sumNumeric(bothRows, 'old', p);
+          const newS = sumNumeric(bothRows, 'new', p);
+          return [p.displayCol, { oldSum: oldS.sum, newSum: newS.sum }];
+        })
+      ),
+    },
+    {
+      category: 'onlyOld',
+      label: '仅A有',
+      recordCount: onlyOldRows.length,
+      numericSums: Object.fromEntries(
+        columnPairs.map((p) => {
+          const oldS = sumNumeric(onlyOldRows, 'old', p);
+          return [p.displayCol, { oldSum: oldS.sum, newSum: 0 }];
+        })
+      ),
+    },
+    {
+      category: 'onlyNew',
+      label: '仅B有',
+      recordCount: onlyNewRows.length,
+      numericSums: Object.fromEntries(
+        columnPairs.map((p) => {
+          const newS = sumNumeric(onlyNewRows, 'new', p);
+          return [p.displayCol, { oldSum: 0, newSum: newS.sum }];
+        })
+      ),
+    },
+  ];
+
+  // 数值不一致单据数
+  const inconsistentCount = bothRows.filter((r) => {
+    if (r.diffType !== 'modified') return false;
+    return r.cells.some((c) => {
+      const pair = columnPairs.find((p) => p.oldCol === c.column || p.newCol === c.column);
+      if (!pair) return false;
+      const { num: on } = parseRobustNumber(c.oldValue);
+      const { num: nn } = parseRobustNumber(c.newValue);
+      if (on === null || nn === null) return false;
+      return Math.abs(on - nn) > 1e-6;
+    });
+  }).length;
+
+  // 差异最大的 Top20 单
+  const topDiffs: MatchClassification['topDiffs'] = [];
+  for (const row of bothRows) {
+    if (row.diffType !== 'modified') continue;
+    for (const cell of row.cells) {
+      const pair = columnPairs.find((p) => p.oldCol === cell.column || p.newCol === cell.column);
+      if (!pair) continue;
+      const { num: on } = parseRobustNumber(cell.oldValue);
+      const { num: nn } = parseRobustNumber(cell.newValue);
+      if (on !== null && nn !== null && Math.abs(on - nn) > 1e-6) {
+        topDiffs.push({ key: row.key, column: pair.displayCol, oldValue: on, newValue: nn, diff: nn - on });
+      }
+    }
+  }
+  topDiffs.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+
+  // 仅A/仅B的单号样例
+  const onlyOldSampleKeys = onlyOldRows.slice(0, 20).map((r) => r.key);
+  const onlyNewSampleKeys = onlyNewRows.slice(0, 20).map((r) => r.key);
+
+  // 自洽校验
+  const selfCheckPassed = columnPairs.every((p) => {
+    const bothOld = matchRows[0].numericSums[p.displayCol]?.oldSum ?? 0;
+    const onlyOldSum = matchRows[1].numericSums[p.displayCol]?.oldSum ?? 0;
+    const bothNew = matchRows[0].numericSums[p.displayCol]?.newSum ?? 0;
+    const onlyNewSum = matchRows[2].numericSums[p.displayCol]?.newSum ?? 0;
+
+    // 计算全表合计
+    let totalOld = 0, totalNew = 0;
+    for (const row of rows) {
+      const cell = row.cells.find((c) => c.column === p.oldCol);
+      if (cell) { const { num } = parseRobustNumber(cell.oldValue); if (num !== null) totalOld += num; }
+    }
+    for (const row of rows) {
+      const cell = row.cells.find((c) => c.column === p.newCol);
+      if (cell) { const { num } = parseRobustNumber(cell.newValue); if (num !== null) totalNew += num; }
+    }
+
+    const oldMatch = Math.abs((bothOld + onlyOldSum) - totalOld) < 0.01;
+    const newMatch = Math.abs((bothNew + onlyNewSum) - totalNew) < 0.01;
+    if (!oldMatch || !newMatch) {
+      console.warn(`[对账自洽校验] 列 "${p.displayCol}" 不通过: A侧 ${bothOld}+${onlyOldSum}≠${totalOld}, B侧 ${bothNew}+${onlyNewSum}≠${totalNew}`);
+    }
+    return oldMatch && newMatch;
+  });
+
+  return {
+    rows: matchRows,
+    numericColumns,
+    inconsistentCount,
+    topDiffs: topDiffs.slice(0, 20),
+    onlyOldSampleKeys,
+    onlyNewSampleKeys,
+    selfCheckPassed,
   };
 }
 
@@ -780,6 +1146,49 @@ export function exportToExcel(results: Array<SheetDiffResult | DocumentDiffResul
       const summarySheet = utils.aoa_to_sheet(summaryData);
       utils.book_append_sheet(wb, summarySheet, `${sheetResult.sheetName}-汇总`);
 
+      // 对账汇总 sheet
+      if (sheetResult.reconciliation) {
+        const recon = sheetResult.reconciliation;
+        const mc = sheetResult.matchClassification;
+        const reconData: unknown[][] = [
+          ['对账汇总'],
+          [''],
+          ['文件A', recon.oldFileName, '行数', recon.oldRowCount],
+          ['文件B', recon.newFileName, '行数', recon.newRowCount],
+          ['行数差', recon.rowDiff],
+          [''],
+          ['数值列对比', 'A合计', 'B合计', '差值'],
+        ];
+        for (const nc of recon.numericComparisons) {
+          reconData.push([nc.column, nc.oldSum, nc.newSum, nc.diff]);
+        }
+        if (mc) {
+          reconData.push([''], ['匹配分类统计']);
+          reconData.push(['分类', '单数', ...mc.numericColumns]);
+          for (const row of mc.rows) {
+            const vals = mc.numericColumns.map((col) => {
+              const sums = row.numericSums[col];
+              if (!sums) return '—';
+              if (row.category === 'both') return `A:${sums.oldSum} / B:${sums.newSum}`;
+              return row.category === 'onlyOld' ? sums.oldSum : sums.newSum;
+            });
+            reconData.push([row.label, row.recordCount, ...vals]);
+          }
+          if (mc.inconsistentCount > 0) {
+            reconData.push([''], ['两边都有但数值不一致', mc.inconsistentCount, '单']);
+          }
+          if (mc.topDiffs.length > 0) {
+            reconData.push([''], ['差异最大的单据 Top' + mc.topDiffs.length]);
+            reconData.push(['单号', '列', 'A值', 'B值', '差值']);
+            for (const td of mc.topDiffs) {
+              reconData.push([td.key, td.column, td.oldValue, td.newValue, td.diff]);
+            }
+          }
+        }
+        const reconSheet = utils.aoa_to_sheet(reconData);
+        utils.book_append_sheet(wb, reconSheet, `${sheetResult.sheetName}-对账汇总`);
+      }
+
       // 明细 sheet
       const detailData: unknown[][] = [
         ['状态', '主键', ...sheetResult.headers],
@@ -809,6 +1218,8 @@ export function buildDiffSummary(results: Array<SheetDiffResult | DocumentDiffRe
   const numericSummaries: Array<{ column: string; oldSum: number; newSum: number; changePercent: number }> = [];
   const examples: Array<{ key: string; column: string; oldValue: string; newValue: string; type: string }> = [];
   const warnings: string[] = [];
+  let reconciliation: Record<string, unknown> | undefined;
+  let matchClassification: Record<string, unknown> | undefined;
 
   for (const r of results) {
     if ('sheetName' in r) {
@@ -836,6 +1247,33 @@ export function buildDiffSummary(results: Array<SheetDiffResult | DocumentDiffRe
       if (sr.duplicateKeyCount > 0) {
         warnings.push(`主键列 "${sr.keyColumn}" 存在 ${sr.duplicateKeyCount} 处重复值`);
       }
+
+      // 对账数据
+      if (sr.reconciliation) {
+        reconciliation = {
+          oldFileName: sr.reconciliation.oldFileName,
+          newFileName: sr.reconciliation.newFileName,
+          oldRowCount: sr.reconciliation.oldRowCount,
+          newRowCount: sr.reconciliation.newRowCount,
+          rowDiff: sr.reconciliation.rowDiff,
+          numericComparisons: sr.reconciliation.numericComparisons.map((nc) => ({
+            column: nc.column, oldSum: nc.oldSum, newSum: nc.newSum, diff: nc.diff,
+          })),
+        };
+      }
+      if (sr.matchClassification) {
+        const mc = sr.matchClassification;
+        matchClassification = {
+          categories: mc.rows.map((row) => ({
+            label: row.label, recordCount: row.recordCount,
+            numericSums: row.numericSums,
+          })),
+          inconsistentCount: mc.inconsistentCount,
+          topDiffs: mc.topDiffs.slice(0, 20),
+          onlyOldSampleKeys: mc.onlyOldSampleKeys.slice(0, 20),
+          onlyNewSampleKeys: mc.onlyNewSampleKeys.slice(0, 20),
+        };
+      }
     }
   }
 
@@ -852,6 +1290,8 @@ export function buildDiffSummary(results: Array<SheetDiffResult | DocumentDiffRe
     numericSummaries: numericSummaries.slice(0, 5),
     typicalExamples: examples.slice(0, 5),
     warnings,
+    reconciliation,
+    matchClassification,
   };
 }
 
@@ -863,34 +1303,72 @@ export function generateLocalAnalysis(summary: Record<string, unknown>): string 
   const numerics = (summary.numericSummaries || []) as Array<{ column: string; oldSum: number; newSum: number; changePercent: number }>;
   const examples = (summary.typicalExamples || []) as Array<{ key: string; column: string; oldValue: string; newValue: string; type: string }>;
   const warnings = (summary.warnings || []) as string[];
+  const reconciliation = summary.reconciliation as Record<string, unknown> | undefined;
+  const matchClassification = summary.matchClassification as Record<string, unknown> | undefined;
 
   const sections: string[] = [];
 
   // 变更概览
   sections.push('【变更概览】');
-  sections.push(`本次比对共涉及 ${ov.totalRows} 行数据，整体变更率 ${(ov.changeRate * 100).toFixed(1)}%。`);
-  sections.push(`其中新增 ${ov.added} 行、删除 ${ov.removed} 行、修改 ${ov.modified} 行、疑似匹配 ${ov.suspected} 行、未变 ${ov.unchanged} 行。`);
-  if (ov.suspected > 0) {
-    sections.push(`发现 ${ov.suspected} 组疑似同行修改（相似度≥85%），可能是格式差异导致的误匹配，建议人工复核。`);
+  if (reconciliation) {
+    const ncs = (reconciliation.numericComparisons || []) as Array<{ column: string; oldSum: number; newSum: number; diff: number }>;
+    sections.push(`文件A「${reconciliation.oldFileName}」共 ${reconciliation.oldRowCount} 单，文件B「${reconciliation.newFileName}」共 ${reconciliation.newRowCount} 单，差 ${Math.abs(reconciliation.rowDiff as number)} 单。`);
+    for (const nc of ncs) {
+      const match = Math.abs(nc.diff) < 0.01 ? '一致' : `差 ${nc.diff.toLocaleString()}`;
+      sections.push(`${nc.column}: A合计 ${nc.oldSum.toLocaleString()} vs B合计 ${nc.newSum.toLocaleString()}，${match}。`);
+    }
   }
+  sections.push(`比对共涉及 ${ov.totalRows} 行数据，整体变更率 ${(ov.changeRate * 100).toFixed(1)}%。`);
+  sections.push(`其中新增 ${ov.added} 行、删除 ${ov.removed} 行、修改 ${ov.modified} 行、疑似匹配 ${ov.suspected} 行、未变 ${ov.unchanged} 行。`);
   sections.push('');
 
-  // 重点风险
-  sections.push('【重点风险】');
-  if (numerics.length > 0) {
-    const bigChanges = numerics.filter((n) => Math.abs(n.changePercent) > 10);
-    if (bigChanges.length > 0) {
-      sections.push(`• 以下数值字段变动超过 10%，需重点关注:`);
-      for (const n of bigChanges) {
-        sections.push(`  - ${n.column}: ${n.oldSum.toLocaleString()} → ${n.newSum.toLocaleString()} (${n.changePercent >= 0 ? '+' : ''}${n.changePercent.toFixed(2)}%)`);
+  // 差异量化拆解
+  sections.push('【重点风险 — 差异量化拆解】');
+  if (matchClassification) {
+    const categories = (matchClassification.categories || []) as Array<{ label: string; recordCount: number; numericSums: Record<string, { oldSum: number; newSum: number }> }>;
+    for (const cat of categories) {
+      const sumParts: string[] = [];
+      for (const [col, sums] of Object.entries(cat.numericSums)) {
+        if (cat.label === '两边都有') {
+          sumParts.push(`${col} A:${sums.oldSum.toLocaleString()}/B:${sums.newSum.toLocaleString()}`);
+        } else if (cat.label === '仅A有') {
+          sumParts.push(`${col} A:${sums.oldSum.toLocaleString()}`);
+        } else {
+          sumParts.push(`${col} B:${sums.newSum.toLocaleString()}`);
+        }
+      }
+      sections.push(`• ${cat.label}: ${cat.recordCount} 单${sumParts.length > 0 ? '（' + sumParts.join('，') + '）' : ''}`);
+    }
+    const inconsistentCount = matchClassification.inconsistentCount as number;
+    if (inconsistentCount > 0) {
+      sections.push(`• 两边都有但数值不一致: ${inconsistentCount} 单`);
+    }
+    // 差异贡献分析
+    if (reconciliation) {
+      const ncs = (reconciliation.numericComparisons || []) as Array<{ column: string; diff: number }>;
+      for (const nc of ncs) {
+        if (Math.abs(nc.diff) < 0.01) continue;
+        const onlyOld = categories.find((c) => c.label === '仅A有');
+        const onlyNew = categories.find((c) => c.label === '仅B有');
+        const onlyOldSum = onlyOld?.numericSums[nc.column]?.oldSum ?? 0;
+        const onlyNewSum = onlyNew?.numericSums[nc.column]?.newSum ?? 0;
+        const bothDiff = nc.diff - onlyNewSum + onlyOldSum;
+        sections.push(`• ${nc.column} 差异拆解: 仅B有贡献 +${onlyNewSum.toLocaleString()}，仅A有贡献 -${onlyOldSum.toLocaleString()}，两边都有但数值不同贡献 ${bothDiff >= 0 ? '+' : ''}${bothDiff.toLocaleString()}`);
+      }
+    }
+  } else {
+    if (numerics.length > 0) {
+      const bigChanges = numerics.filter((n) => Math.abs(n.changePercent) > 10);
+      if (bigChanges.length > 0) {
+        sections.push(`• 以下数值字段变动超过 10%，需重点关注:`);
+        for (const n of bigChanges) {
+          sections.push(`  - ${n.column}: ${n.oldSum.toLocaleString()} → ${n.newSum.toLocaleString()} (${n.changePercent >= 0 ? '+' : ''}${n.changePercent.toFixed(2)}%)`);
+        }
       }
     }
   }
   if (warnings.length > 0) {
     for (const w of warnings) sections.push(`• ${w}`);
-  }
-  if (sections[sections.length - 1] === '【重点风险】') {
-    sections.push('• 未发现明显风险项。');
   }
   sections.push('');
 
@@ -908,16 +1386,41 @@ export function generateLocalAnalysis(summary: Record<string, unknown>): string 
       sections.push(`  - 行 "${ex.key}" 的 [${ex.column}]: "${ex.oldValue}" → "${ex.newValue}"`);
     }
   }
+  if (matchClassification) {
+    const topDiffs = (matchClassification.topDiffs || []) as Array<{ key: string; column: string; oldValue: number; newValue: number; diff: number }>;
+    if (topDiffs.length > 0) {
+      sections.push('• 差异最大的单据:');
+      for (const td of topDiffs.slice(0, 5)) {
+        sections.push(`  - 单号 ${td.key}，${td.column}: A=${td.oldValue} → B=${td.newValue}，差 ${td.diff}`);
+      }
+    }
+  }
   sections.push('');
 
   // 后续建议
   sections.push('【后续建议】');
-  sections.push('• 对疑似匹配的行进行人工复核，确认是否为同一数据项的格式差异。');
+  if (matchClassification) {
+    const onlyOldKeys = (matchClassification.onlyOldSampleKeys || []) as string[];
+    const onlyNewKeys = (matchClassification.onlyNewSampleKeys || []) as string[];
+    if (onlyNewKeys.length > 0) {
+      sections.push(`• 优先核查仅B有的 ${onlyNewKeys.length} 单（样例: ${onlyNewKeys.slice(0, 5).join('、')}），可能是A侧漏单或B侧重复提交。`);
+    }
+    if (onlyOldKeys.length > 0) {
+      sections.push(`• 核查仅A有的 ${onlyOldKeys.length} 单（样例: ${onlyOldKeys.slice(0, 5).join('、')}），可能是B侧漏单或数据时点差异。`);
+    }
+    const inconsistentCount = matchClassification.inconsistentCount as number;
+    if (inconsistentCount > 0) {
+      sections.push(`• 对 ${inconsistentCount} 单两边都有但数值不一致的单据逐单核对，重点关注差异金额最大的单据。`);
+    }
+  }
+  if (ov.suspected > 0) {
+    sections.push('• 对疑似匹配的行进行人工复核，确认是否为同一数据项的格式差异。');
+  }
   if (numerics.some((n) => Math.abs(n.changePercent) > 5)) {
     sections.push('• 对数值变动超过 5% 的字段进行业务验证，确认变更合理性。');
   }
   sections.push('• 建议统一日期和数值格式，减少因格式差异导致的误报。');
-  sections.push('• 配置 API Key 可获取更深度的 AI 智能分析。');
+  sections.push('• 配置 API Key 可获取更深度的 AI 智能分析与业务原因推断。');
 
   return sections.join('\n');
 }
