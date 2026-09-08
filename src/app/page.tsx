@@ -563,7 +563,7 @@ export default function Home() {
 
         {/* 版本标识 */}
         <footer className="mt-8 pb-6 text-center text-xs text-slate-400">
-          v2.6 · 2026-04-23 · 智能文件比对分析平台
+          v2.6 · 2026-09-08 · 智能文件比对分析平台
         </footer>
       </main>
     </div>
