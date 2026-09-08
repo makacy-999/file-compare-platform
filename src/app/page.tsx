@@ -14,8 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { FileUpload } from '@/components/file-upload';
 import { DiffResultView } from '@/components/diff-result-view';
 import { AIAnalysisPanel } from '@/components/ai-analysis-panel';
-import { parseFile, diffSheets, exportToExcel, detectBestKeyColumn } from '@/lib/file-utils';
-import type { ParsedFile, DiffResult, DiffType, SheetData, SheetDiffResult } from '@/types';
+import { parseFile, diffSheets, diffParagraphs, exportToExcel, detectBestKeyColumn } from '@/lib/file-utils';
+import type { ParsedFile, DiffResult, DiffType, SheetData, SheetDiffResult, DocumentDiffResult } from '@/types';
 
 type CompareMode = 'auto' | 'sheet';
 type FileStatus = 'idle' | 'parsing' | 'success' | 'error';
@@ -35,6 +35,7 @@ export default function Home() {
   const [apiKey, setApiKey] = useState('');
   const [selectedKeyColumn, setSelectedKeyColumn] = useState<string>('');
   const [autoKeyColumn, setAutoKeyColumn] = useState<string>('');
+  const [compareError, setCompareError] = useState<string>('');
 
   const allSheets = useMemo(() => {
     const sheets: string[] = [];
@@ -95,37 +96,44 @@ export default function Home() {
 
     setIsComparing(true);
     setDiffResults([]);
+    setCompareError('');
 
     try {
-      const keyCol = selectedKeyColumn || suggestedKeyColumn || undefined;
+      const fileA = successFiles[0];
+      const fileB = successFiles[1];
 
-      // 获取两个文件的 sheet 数据
-      const getSheets = (f: FileWithStatus): SheetData[] => {
-        if (f.type === 'excel' && f.data?.sheets) return f.data.sheets;
-        return [];
-      };
+      const isExcelA = fileA.type === 'excel';
+      const isExcelB = fileB.type === 'excel';
+      const isDocA = fileA.type === 'word' || fileA.type === 'pdf';
+      const isDocB = fileB.type === 'word' || fileB.type === 'pdf';
 
-      const oldSheets = getSheets(successFiles[0]);
-      const newSheets = getSheets(successFiles[1]);
+      if ((isExcelA && isDocB) || (isDocA && isExcelB)) {
+        setCompareError('请上传两个同类型文件进行比对（Excel 与 Excel，或 Word/PDF 与 Word/PDF）');
+        return;
+      }
 
-      if (oldSheets.length === 0 || newSheets.length === 0) {
-        // 文档比对
-        const results: DiffResult[] = [];
-        // 简化处理：只比对第一个 sheet
-        if (oldSheets.length > 0 && newSheets.length > 0) {
-          const result = diffSheets(oldSheets[0], newSheets[0], keyCol);
-          results.push(result);
+      if (isExcelA && isExcelB) {
+        const keyCol = selectedKeyColumn || suggestedKeyColumn || undefined;
+        const oldSheets = fileA.data?.sheets ?? [];
+        const newSheets = fileB.data?.sheets ?? [];
+
+        if (oldSheets.length === 0 || newSheets.length === 0) {
+          setCompareError('文件解析结果为空，请检查文件内容');
+          return;
         }
-        setDiffResults(results);
-      } else {
-        // 表格比对
+
+        const totalRows = oldSheets.reduce((s, sh) => s + sh.rows.length, 0)
+          + newSheets.reduce((s, sh) => s + sh.rows.length, 0);
+        if (totalRows > 5000) {
+          setCompareError(`文件较大（共 ${totalRows} 行），比对可能需要几秒，请耐心等待…`);
+        }
+
         const results: SheetDiffResult[] = [];
         if (compareMode === 'sheet' && selectedSheet) {
           const oldSheet = oldSheets.find((s) => s.name === selectedSheet) || oldSheets[0];
           const newSheet = newSheets.find((s) => s.name === selectedSheet) || newSheets[0];
           results.push(diffSheets(oldSheet, newSheet, keyCol));
         } else {
-          // 自动匹配：按 sheet 名称配对
           const matched = new Set<string>();
           for (const oldSheet of oldSheets) {
             const newSheet = newSheets.find((s) => s.name === oldSheet.name && !matched.has(s.name));
@@ -134,7 +142,6 @@ export default function Home() {
               matched.add(newSheet.name);
             }
           }
-          // 未匹配的 sheet 按顺序配对
           const unmatchedOld = oldSheets.filter((s) => !matched.has(s.name));
           const unmatchedNew = newSheets.filter((s) => !matched.has(s.name));
           for (let i = 0; i < Math.min(unmatchedOld.length, unmatchedNew.length); i++) {
@@ -142,9 +149,37 @@ export default function Home() {
           }
         }
         setDiffResults(results);
+      } else if (isDocA && isDocB) {
+        const oldParas = fileA.data?.paragraphs ?? [];
+        const newParas = fileB.data?.paragraphs ?? [];
+
+        if (oldParas.length === 0 && newParas.length === 0) {
+          setCompareError('文件解析结果为空，请检查文件内容');
+          return;
+        }
+
+        const items = diffParagraphs(oldParas, newParas);
+        const addedCount = items.filter((i) => i.diffType === 'added').length;
+        const removedCount = items.filter((i) => i.diffType === 'removed').length;
+        const modifiedCount = items.filter((i) => i.diffType === 'modified').length;
+        const docResult: DocumentDiffResult = {
+          type: 'paragraph',
+          oldFileName: fileA.name,
+          newFileName: fileB.name,
+          totalOldParagraphs: oldParas.length,
+          totalNewParagraphs: newParas.length,
+          added: addedCount,
+          removed: removedCount,
+          modified: modifiedCount,
+          items,
+        };
+        setDiffResults([docResult]);
+      } else {
+        setCompareError('不支持的文件类型组合，请上传两个 Excel 或两个 Word/PDF 文件');
       }
     } catch (err) {
-      console.error('比对失败:', err);
+      const msg = err instanceof Error ? err.message : '未知错误';
+      setCompareError(`比对失败：${msg}`);
     } finally {
       setIsComparing(false);
     }
@@ -167,6 +202,7 @@ export default function Home() {
     setFilter('all');
     setSelectedKeyColumn('');
     setAutoKeyColumn('');
+    setCompareError('');
   }, []);
 
   const removeFile = useCallback((file: File) => {
@@ -313,6 +349,13 @@ export default function Home() {
                     </>
                   )}
                 </Button>
+
+                {compareError && (
+                  <div className="mt-3 flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+                    <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                    <span>{compareError}</span>
+                  </div>
+                )}
               </div>
             )}
           </CardContent>
@@ -323,6 +366,14 @@ export default function Home() {
           <div className="space-y-6">
             {/* 汇总概览卡片 */}
             <OverviewCards results={diffResults} />
+
+            {/* 性能保护提示 */}
+            {diffResults.some((r) => 'skippedSimilarity' in r && r.skippedSimilarity) && (
+              <div className="flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-700">
+                <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+                <span>数据量过大，已跳过智能相似配对，差异行直接归入新增/删除。</span>
+              </div>
+            )}
 
             {/* 差异详情 */}
             <Card className="border-slate-200 shadow-sm">

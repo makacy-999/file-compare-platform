@@ -81,6 +81,7 @@ export interface SheetDiffResult {
   unmappedNewColumns: string[];
   duplicateKeyCount: number;
   keyColumnScores: KeyScore[];
+  skippedSimilarity?: boolean;
 }
 
 // 主键候选评分

@@ -117,6 +117,8 @@ function levenshteinDistance(a: string, b: string): number {
   const lb = b.length;
   if (la === 0) return lb;
   if (lb === 0) return la;
+  const maxLen = Math.max(la, lb);
+  if (Math.abs(la - lb) / maxLen > 0.4) return maxLen;
 
   const dp: number[] = Array.from({ length: lb + 1 }, (_, j) => j);
 
@@ -155,8 +157,8 @@ function computeRowSimilarity(
   const newKey = String(newRow[keyCol] ?? '').trim();
   const keySim = stringSimilarity(oldKey, newKey);
 
-  const oldStr = rowToString(oldRow, headers);
-  const newStr = rowToString(newRow, headers);
+  const oldStr = rowToString(oldRow, headers).slice(0, 500);
+  const newStr = rowToString(newRow, headers).slice(0, 500);
   const rowSim = stringSimilarity(oldStr, newStr);
 
   const combined = keySim * 0.5 + rowSim * 0.5;
@@ -426,43 +428,46 @@ export function diffSheets(
     }
   }
 
-  // 相似度贪心匹配
+  // 相似度贪心匹配（带性能保护）
   const usedOldIdx = new Set<number>();
   const usedNewIdx = new Set<number>();
+  const skipSimilarity = unmatchedOld.length * unmatchedNew.length > 20000;
 
-  const pairScores: Array<{ oldIdx: number; newIdx: number; sim: number; reason: string }> = [];
-  for (let oi = 0; oi < unmatchedOld.length; oi++) {
-    for (let ni = 0; ni < unmatchedNew.length; ni++) {
-      const { similarity, reason } = computeRowSimilarity(
-        unmatchedOld[oi].row, unmatchedNew[ni].row, displayHeaders, key,
-      );
-      if (similarity >= SUSPECTED_THRESHOLD) {
-        pairScores.push({ oldIdx: oi, newIdx: ni, sim: similarity, reason });
+  if (!skipSimilarity) {
+    const pairScores: Array<{ oldIdx: number; newIdx: number; sim: number; reason: string }> = [];
+    for (let oi = 0; oi < unmatchedOld.length; oi++) {
+      for (let ni = 0; ni < unmatchedNew.length; ni++) {
+        const { similarity, reason } = computeRowSimilarity(
+          unmatchedOld[oi].row, unmatchedNew[ni].row, displayHeaders, key,
+        );
+        if (similarity >= SUSPECTED_THRESHOLD) {
+          pairScores.push({ oldIdx: oi, newIdx: ni, sim: similarity, reason });
+        }
       }
     }
-  }
-  pairScores.sort((a, b) => b.sim - a.sim);
+    pairScores.sort((a, b) => b.sim - a.sim);
 
-  for (const pair of pairScores) {
-    if (usedOldIdx.has(pair.oldIdx) || usedNewIdx.has(pair.newIdx)) continue;
-    usedOldIdx.add(pair.oldIdx);
-    usedNewIdx.add(pair.newIdx);
+    for (const pair of pairScores) {
+      if (usedOldIdx.has(pair.oldIdx) || usedNewIdx.has(pair.newIdx)) continue;
+      usedOldIdx.add(pair.oldIdx);
+      usedNewIdx.add(pair.newIdx);
 
-    const oldRow = unmatchedOld[pair.oldIdx].row;
-    const newRow = unmatchedNew[pair.newIdx].row;
-    const { cells, hasDiff } = compareRows(oldRow, newRow);
-    const displayKey = unmatchedOld[pair.oldIdx].key;
-    suspected++;
-    rows.push({
-      rowIndex: rowIndex++,
-      key: displayKey,
-      diffType: 'suspected',
-      cells,
-      oldRow,
-      newRow,
-      matchReason: pair.reason,
-      similarity: pair.sim,
-    });
+      const oldRow = unmatchedOld[pair.oldIdx].row;
+      const newRow = unmatchedNew[pair.newIdx].row;
+      const { cells } = compareRows(oldRow, newRow);
+      const displayKey = unmatchedOld[pair.oldIdx].key;
+      suspected++;
+      rows.push({
+        rowIndex: rowIndex++,
+        key: displayKey,
+        diffType: 'suspected',
+        cells,
+        oldRow,
+        newRow,
+        matchReason: pair.reason,
+        similarity: pair.sim,
+      });
+    }
   }
 
   // 剩余未匹配的 → added / removed
@@ -509,6 +514,7 @@ export function diffSheets(
     unmappedNewColumns: unmappedNew,
     duplicateKeyCount,
     keyColumnScores: keyScores,
+    skippedSimilarity: skipSimilarity || undefined,
   };
 }
 
