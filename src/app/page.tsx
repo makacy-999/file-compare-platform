@@ -45,6 +45,7 @@ export default function Home() {
   const [autoOldTimeColumn, setAutoOldTimeColumn] = useState<string>('');
   const [autoNewTimeColumn, setAutoNewTimeColumn] = useState<string>('');
   const [timeGranularity, setTimeGranularity] = useState<TimeGranularity | ''>('');
+  const [timeScope, setTimeScope] = useState<'all' | 'both'>('all');
 
   // AI 设置持久化
   const [aiBaseUrl, setAiBaseUrl] = useState('https://api.openai.com/v1');
@@ -192,23 +193,24 @@ export default function Home() {
         const otc = oldTimeColumn || autoOldTimeColumn || undefined;
         const ntc = newTimeColumn || autoNewTimeColumn || undefined;
         const tg = timeGranularity || undefined;
+        const ts = timeScope;
         if (compareMode === 'sheet' && selectedSheet) {
           const oldSheet = oldSheets.find((s) => s.name === selectedSheet) || oldSheets[0];
           const newSheet = newSheets.find((s) => s.name === selectedSheet) || newSheets[0];
-          results.push(diffSheets(oldSheet, newSheet, keyCol, oldKeyCol, newKeyCol, otc, ntc, tg));
+          results.push(diffSheets(oldSheet, newSheet, keyCol, oldKeyCol, newKeyCol, otc, ntc, tg, ts));
         } else {
           const matched = new Set<string>();
           for (const oldSheet of oldSheets) {
             const newSheet = newSheets.find((s) => s.name === oldSheet.name && !matched.has(s.name));
             if (newSheet) {
-              results.push(diffSheets(oldSheet, newSheet, keyCol, oldKeyCol, newKeyCol, otc, ntc, tg));
+              results.push(diffSheets(oldSheet, newSheet, keyCol, oldKeyCol, newKeyCol, otc, ntc, tg, ts));
               matched.add(newSheet.name);
             }
           }
           const unmatchedOld = oldSheets.filter((s) => !matched.has(s.name));
           const unmatchedNew = newSheets.filter((s) => !matched.has(s.name));
           for (let i = 0; i < Math.min(unmatchedOld.length, unmatchedNew.length); i++) {
-            results.push(diffSheets(unmatchedOld[i], unmatchedNew[i], keyCol, oldKeyCol, newKeyCol, otc, ntc, tg));
+            results.push(diffSheets(unmatchedOld[i], unmatchedNew[i], keyCol, oldKeyCol, newKeyCol, otc, ntc, tg, ts));
           }
         }
 
@@ -255,7 +257,7 @@ export default function Home() {
     } finally {
       setIsComparing(false);
     }
-  }, [files, compareMode, selectedSheet, selectedKeyColumn, suggestedKeyColumn, oldKeyColumn, newKeyColumn, oldTimeColumn, newTimeColumn, autoOldTimeColumn, autoNewTimeColumn, timeGranularity]);
+  }, [files, compareMode, selectedSheet, selectedKeyColumn, suggestedKeyColumn, oldKeyColumn, newKeyColumn, oldTimeColumn, newTimeColumn, autoOldTimeColumn, autoNewTimeColumn, timeGranularity, timeScope]);
 
   const handleExport = useCallback(() => {
     if (diffResults.length === 0) return;
@@ -430,6 +432,16 @@ export default function Home() {
                           <SelectItem value="day">按日</SelectItem>
                           <SelectItem value="week">按周</SelectItem>
                           <SelectItem value="month">按月</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <span className="text-[10px] text-slate-400">口径:</span>
+                      <Select value={timeScope} onValueChange={(v) => setTimeScope(v as 'all' | 'both')}>
+                        <SelectTrigger className="w-28 h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">全部</SelectItem>
+                          <SelectItem value="both">仅两边都有</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
@@ -841,8 +853,21 @@ function ReconciliationPanel({ result }: { result: SheetDiffResult }) {
       )}
 
       {/* 按时间对比 */}
-      {result.timeComparison && result.timeComparison.rows.length > 0 && (
+      {result.timeComparison && result.timeComparison.rows.length > 0 ? (
         <TimeComparisonPanel data={result.timeComparison} />
+      ) : (
+        <Card className="border-slate-200 shadow-sm">
+          <CardContent className="pt-5">
+            <h2 className="text-base font-semibold text-slate-800 flex items-center gap-2 mb-3">
+              <span className="text-violet-600">📅</span>
+              按时间对比
+            </h2>
+            <div className="flex items-center gap-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-700">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+              <span>未识别到时间列，请手动选择</span>
+            </div>
+          </CardContent>
+        </Card>
       )}
     </div>
   );

@@ -187,6 +187,8 @@ function SheetDiffCard({ result, filter: externalFilter, onFilterChange }: {
   const setFilter = onFilterChange ?? setInternalFilter;
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
+  const isZeroMatch = (result.matchQuality?.matchRate ?? 1) === 0;
+  const [collapsed, setCollapsed] = useState(isZeroMatch);
 
   const stats = useMemo(() => computeDiffStatistics(result), [result]);
 
@@ -287,7 +289,17 @@ function SheetDiffCard({ result, filter: externalFilter, onFilterChange }: {
         )}
       </div>
 
+      {/* 0% 匹配强提示 */}
+      {isZeroMatch && (
+        <div className="mx-5 mt-3 flex items-center gap-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700 font-medium">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          匹配率为 0%，请检查主键列选择是否正确
+        </div>
+      )}
+
       {/* 汇总统计 */}
+      {!collapsed && (
+      <>
       <div className="px-5 py-3 border-b border-slate-100 bg-slate-50/30">
         <SummaryPanel stats={stats} />
       </div>
@@ -340,6 +352,20 @@ function SheetDiffCard({ result, filter: externalFilter, onFilterChange }: {
           <div className="py-8 text-center text-sm text-slate-400">没有符合筛选条件的行</div>
         )}
       </div>
+      </>
+      )}
+
+      {/* 折叠/展开切换 */}
+      {isZeroMatch && (
+        <div className="px-5 py-3 border-t border-slate-100 text-center">
+          <button
+            onClick={() => setCollapsed(!collapsed)}
+            className="text-xs text-slate-500 hover:text-slate-700 underline"
+          >
+            {collapsed ? '展开差异明细' : '折叠差异明细'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

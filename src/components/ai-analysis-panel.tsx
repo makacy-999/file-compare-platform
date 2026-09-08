@@ -5,6 +5,7 @@ import { Sparkles, Copy, Check, RefreshCw, Square, AlertTriangle, TrendingUp, Tr
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { cn } from '@/lib/utils';
 import { buildDiffSummary, generateLocalAnalysis } from '@/lib/file-utils';
 import type { DiffResult, SheetDiffResult } from '@/types';
 
@@ -25,6 +26,7 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
   const [showSettings, setShowSettings] = useState(false);
   const [localBase, setLocalBase] = useState(apiBase || '');
   const [localModel, setLocalModel] = useState(apiModel || '');
+  const [settingsSaved, setSettingsSaved] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -223,10 +225,14 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
                 <Button
                   size="sm"
                   variant="outline"
-                  className="h-7 text-[10px] w-full"
-                  onClick={() => onSaveSettings?.(localBase, localModel)}
+                  className={cn("h-7 text-[10px] w-full transition-colors", settingsSaved && "bg-emerald-50 text-emerald-700 border-emerald-200")}
+                  onClick={() => {
+                    onSaveSettings?.(localBase, localModel);
+                    setSettingsSaved(true);
+                    setTimeout(() => setSettingsSaved(false), 1800);
+                  }}
                 >
-                  保存设置
+                  {settingsSaved ? '✓ 已保存' : '保存设置'}
                 </Button>
               </div>
             )}

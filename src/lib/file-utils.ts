@@ -470,6 +470,7 @@ export function diffSheets(
   oldTimeColumn?: string,
   newTimeColumn?: string,
   timeGranularity?: TimeGranularity,
+  timeScope?: 'all' | 'both',
 ): SheetDiffResult {
   const allHeaders = [...new Set([...oldSheet.headers, ...newSheet.headers])];
   const keyScores = analyzeKeyColumns(oldSheet.headers.length > 0 ? oldSheet : newSheet);
@@ -709,7 +710,7 @@ export function diffSheets(
   const effectiveOldTimeCol = oldTimeColumn || detectTimeColumn(oldSheet) || '';
   const effectiveNewTimeCol = newTimeColumn || detectTimeColumn(newSheet) || '';
   const timeComparisonResult = (effectiveOldTimeCol && effectiveNewTimeCol)
-    ? computeTimeComparison(oldSheet, newSheet, effectiveOldTimeCol, effectiveNewTimeCol, columnMappings, timeGranularity || null)
+    ? computeTimeComparison(oldSheet, newSheet, effectiveOldTimeCol, effectiveNewTimeCol, columnMappings, timeGranularity || null, timeScope || 'all')
     : undefined;
   const timeComparison = timeComparisonResult ?? undefined;
 
