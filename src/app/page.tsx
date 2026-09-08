@@ -12,6 +12,11 @@ import {
   FileSpreadsheet,
   FileText,
   AlertTriangle,
+  TrendingUp,
+  TrendingDown,
+  Minus,
+  RefreshCw,
+  File as FilesIcon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -27,6 +32,7 @@ import type {
   AnalysisSummary,
   SheetDiffResult,
   DocumentDiffResult,
+  DiffType,
 } from '@/types';
 
 export default function HomePage() {
@@ -58,6 +64,8 @@ export default function HomePage() {
   const hasComparableDoc = docFiles.length >= 2;
   const canActuallyCompare = hasComparableExcel || hasComparableDoc;
   const [compareError, setCompareError] = useState<string | null>(null);
+  const [keyColumn, setKeyColumn] = useState<string>('');
+  const [diffFilter, setDiffFilter] = useState<'all' | DiffType>('all');
 
   const handleCompare = useCallback(() => {
     if (parsedFiles.length < 2) {
@@ -100,7 +108,7 @@ export default function HomePage() {
             }
             if (matchSheet) {
               matchedCompareIndices.add(matchIdx);
-              const diff = diffSheets(baseSheet, matchSheet);
+              const diff = diffSheets(baseSheet, matchSheet, keyColumn || undefined);
               const namedDiff: SheetDiffResult = {
                 ...diff,
                 sheetName: `${baseFile.name} → ${compareFile.name} / ${diff.sheetName}`,
@@ -164,6 +172,13 @@ export default function HomePage() {
         modified: totalModified,
         comparisonType,
       });
+      // 自动设置默认主键列（第一个 sheet 的第一个表头）
+      const firstSheet = results.find(
+        (r): r is SheetDiffResult => 'sheetName' in r,
+      );
+      if (firstSheet && firstSheet.headers.length > 0 && !keyColumn) {
+        setKeyColumn(firstSheet.keyColumn || firstSheet.headers[0]);
+      }
       if (results.length === 0) {
         const allFileInfo = parsedFiles.map((f) => `${f.name}[类型:${f.type},状态:${f.status}]`).join('、');
         const excelInfo = excelFiles.length > 0
@@ -531,15 +546,108 @@ export default function HomePage() {
               </TabsContent>
 
               <TabsContent value="result">
+                {/* 差异汇总 */}
+                {summary && diffResults.length > 0 && (
+                  <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <Card className="border-slate-200 bg-white">
+                      <CardContent className="p-4">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-lg bg-slate-100 text-slate-600">
+                            <FilesIcon className="h-5 w-5" />
+                          </div>
+                          <div>
+                            <p className="text-xs text-slate-500">比对文件</p>
+                            <p className="text-xl font-bold text-slate-800 tabular-nums">{summary.filesCompared} 个</p>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                    <Card className="border-emerald-200 bg-emerald-50/50">
+                      <CardContent className="p-4">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-lg bg-emerald-100 text-emerald-600">
+                            <TrendingUp className="h-5 w-5" />
+                          </div>
+                          <div>
+                            <p className="text-xs text-emerald-600">新增行</p>
+                            <p className="text-xl font-bold text-emerald-700 tabular-nums">{summary.added}</p>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                    <Card className="border-red-200 bg-red-50/50">
+                      <CardContent className="p-4">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-lg bg-red-100 text-red-600">
+                            <TrendingDown className="h-5 w-5" />
+                          </div>
+                          <div>
+                            <p className="text-xs text-red-600">删除行</p>
+                            <p className="text-xl font-bold text-red-700 tabular-nums">{summary.removed}</p>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                    <Card className="border-amber-200 bg-amber-50/50">
+                      <CardContent className="p-4">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-lg bg-amber-100 text-amber-600">
+                            <Minus className="h-5 w-5" />
+                          </div>
+                          <div>
+                            <p className="text-xs text-amber-600">修改行</p>
+                            <p className="text-xl font-bold text-amber-700 tabular-nums">{summary.modified}</p>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
+
                 <Card>
                   <CardHeader className="pb-2">
-                    <CardTitle className="text-base flex items-center gap-2">
-                      <BarChart3 className="h-5 w-5 text-slate-600" />
-                      比对分析结果
-                    </CardTitle>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <CardTitle className="text-base flex items-center gap-2">
+                        <BarChart3 className="h-5 w-5 text-slate-600" />
+                        比对分析结果
+                        {summary && (
+                          <Badge variant="secondary" className="ml-2 text-xs">
+                            共 {summary.totalDifferences} 处差异
+                          </Badge>
+                        )}
+                      </CardTitle>
+                      {keyColumn && (
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="text-slate-500 text-xs">主键列：</span>
+                          <select
+                            value={keyColumn}
+                            onChange={(e) => setKeyColumn(e.target.value)}
+                            className="px-2 py-1 text-xs border border-slate-200 rounded-md bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-400"
+                          >
+                            {(() => {
+                              const first = diffResults.find(
+                                (r): r is SheetDiffResult => 'headers' in r,
+                              );
+                              return first?.headers.map((h) => (
+                                <option key={h} value={h}>{h}</option>
+                              ));
+                            })()}
+                          </select>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={handleCompare}
+                            className="h-7 text-xs px-2"
+                          >
+                            <RefreshCw className="h-3 w-3 mr-1" />
+                            重新比对
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   </CardHeader>
                   <CardContent>
-                    <DiffResultView results={diffResults} />
+                    <DiffResultView results={diffResults} filter={diffFilter} onFilterChange={setDiffFilter} />
                   </CardContent>
                 </Card>
               </TabsContent>

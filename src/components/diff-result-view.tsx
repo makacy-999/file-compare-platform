@@ -9,9 +9,11 @@ import type { SheetDiffResult, DocumentDiffResult, DiffType } from '@/types';
 
 interface DiffResultViewProps {
   results: Array<SheetDiffResult | DocumentDiffResult>;
+  filter?: 'all' | DiffType;
+  onFilterChange?: (f: 'all' | DiffType) => void;
 }
 
-export function DiffResultView({ results }: DiffResultViewProps) {
+export function DiffResultView({ results, filter: externalFilter, onFilterChange }: DiffResultViewProps) {
   if (results.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-slate-400">
@@ -47,7 +49,7 @@ export function DiffResultView({ results }: DiffResultViewProps) {
       {sheetResults.length > 0 && (
         <TabsContent value="sheet" className="space-y-6">
           {sheetResults.map((result, idx) => (
-            <SheetDiffCard key={idx} result={result} />
+            <SheetDiffCard key={idx} result={result} filter={externalFilter} onFilterChange={onFilterChange} />
           ))}
         </TabsContent>
       )}
@@ -63,8 +65,14 @@ export function DiffResultView({ results }: DiffResultViewProps) {
   );
 }
 
-function SheetDiffCard({ result }: { result: SheetDiffResult }) {
-  const [filter, setFilter] = useState<DiffType | 'all'>('all');
+function SheetDiffCard({ result, filter: externalFilter, onFilterChange }: {
+  result: SheetDiffResult;
+  filter?: 'all' | DiffType;
+  onFilterChange?: (f: 'all' | DiffType) => void;
+}) {
+  const [internalFilter, setInternalFilter] = useState<DiffType | 'all'>('all');
+  const filter = externalFilter ?? internalFilter;
+  const setFilter = onFilterChange ?? setInternalFilter;
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
 
   const filteredRows = useMemo(() => {
