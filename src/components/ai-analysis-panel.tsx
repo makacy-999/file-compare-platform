@@ -14,9 +14,10 @@ interface AIAnalysisPanelProps {
   onApiKeyChange?: (key: string) => void;
   apiBase?: string;
   apiModel?: string;
+  onSaveSettings?: (base: string, model: string) => void;
 }
 
-export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, apiModel }: AIAnalysisPanelProps) {
+export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, apiModel, onSaveSettings }: AIAnalysisPanelProps) {
   const [analysis, setAnalysis] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -219,6 +220,14 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
                     className="h-8 text-xs"
                   />
                 </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-[10px] w-full"
+                  onClick={() => onSaveSettings?.(localBase, localModel)}
+                >
+                  保存设置
+                </Button>
               </div>
             )}
           </div>
@@ -353,10 +362,10 @@ function buildSystemPrompt(): string {
 
 请严格按以下四个分块输出，每块用【】标注标题：
 
-【变更概览】用 2-3 句话概括整体变更规模、影响范围。如有对账数据，先说明两文件行数差异和数值列合计差异。
-【重点风险】列出需要重点关注的高风险变更，如金额大额变动、关键字段缺失、主键异常等。如有对账数据，分析差异量化拆解（仅B有/仅A有/两边都有但数值不同，各自贡献的差值与占比）。
+【变更概览】用 2-3 句话概括整体变更规模、影响范围。如有对账数据，先说明两文件行数差异和数值列合计差异。如有按时间对比数据，说明差异的时间分布特征。
+【重点风险】列出需要重点关注的高风险变更，如金额大额变动、关键字段缺失、主键异常等。如有对账数据，分析差异量化拆解（仅B有/仅A有/两边都有但数值不同，各自贡献的差值与占比）。如有按时间对比数据，分析差异集中在哪些时间段（如月初/周末/某几天），并推断可能原因。
 【数据质量观察】指出数据格式不一致、主键重复、空值异常等质量问题。推断可能的业务原因（如重复提交、漏单、数据时点差异、单票数量录入差异）。
-【后续建议】给出 3-5 条具体可执行的核查建议，按优先级列出建议核对的明细范围与单号。
+【后续建议】给出 3-5 条具体可执行的核查建议，按优先级列出建议核对的明细范围与单号。如有按时间对比数据，建议优先核查差异最大的时间段。
 
 要求：分析要基于数据事实，不要编造；数字要准确；建议要具体可操作。`;
 }
@@ -374,6 +383,7 @@ function buildUserPrompt(summary: Record<string, unknown>): string {
   const matchClassification = summary.matchClassification as Record<string, unknown> | undefined;
   const matchQuality = summary.matchQuality as Record<string, unknown> | undefined;
   const crossKeyMapping = summary.crossKeyMapping as Record<string, unknown> | undefined;
+  const timeComparison = summary.timeComparison as Record<string, unknown> | undefined;
 
   if (overview) {
     parts.push(`## 比对概要`);
@@ -463,6 +473,48 @@ function buildUserPrompt(summary: Record<string, unknown>): string {
       parts.push(onlyNewKeys.join('、'));
       parts.push('');
     }
+  }
+
+  // 按时间对比
+  if (timeComparison) {
+    const granularity = timeComparison.granularity as string;
+    const granularityLabel = granularity === 'day' ? '按日' : granularity === 'week' ? '按周' : '按月';
+    const oldTimeCol = timeComparison.oldTimeColumn as string;
+    const newTimeCol = timeComparison.newTimeColumn as string;
+    const totalOld = timeComparison.totalOld as number;
+    const totalNew = timeComparison.totalNew as number;
+    const totalDiff = timeComparison.totalDiff as number;
+    const periodCount = timeComparison.periodCount as number;
+    const topDiffPeriods = (timeComparison.topDiffPeriods || []) as Array<{ period: string; column: string; diff: number }>;
+    const rows = timeComparison.rows as Array<Record<string, unknown>> | undefined;
+
+    parts.push(`## 按时间对比（${granularityLabel}）`);
+    parts.push(`- 时间列: A「${oldTimeCol}」↔ B「${newTimeCol}」`);
+    parts.push(`- 期间数: ${periodCount}`);
+    parts.push(`- 全表合计: A ${totalOld.toLocaleString()} vs B ${totalNew.toLocaleString()}，差 ${totalDiff.toLocaleString()}`);
+
+    if (topDiffPeriods.length > 0) {
+      parts.push(`- 差异最大的期间:`);
+      for (const p of topDiffPeriods.slice(0, 10)) {
+        parts.push(`  - ${p.period}，${p.column}: 差 ${p.diff.toLocaleString()}`);
+      }
+    }
+
+    // 如果期间数 <= 62，输出每个期间的详细数据
+    if (rows && periodCount <= 62) {
+      parts.push(`- 各期间明细:`);
+      for (const row of rows.slice(0, 30)) {
+        const period = row.period as string;
+        const numericSums = row.numericSums as Record<string, { oldSum: number; newSum: number; diff: number }> | undefined;
+        if (numericSums) {
+          const sumParts = Object.entries(numericSums).map(([col, sums]) =>
+            `${col}: A=${sums.oldSum}/B=${sums.newSum}/差=${sums.diff}`
+          ).join('，');
+          parts.push(`  - ${period}: ${sumParts}`);
+        }
+      }
+    }
+    parts.push('');
   }
 
   if (warnings.length > 0) {

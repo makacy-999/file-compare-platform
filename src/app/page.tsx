@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   Upload, FileSpreadsheet, FileText, Image as ImageIcon, File,
   Sparkles, Download, Trash2, AlertCircle, CheckCircle2, XCircle,
@@ -14,8 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { FileUpload } from '@/components/file-upload';
 import { DiffResultView } from '@/components/diff-result-view';
 import { AIAnalysisPanel } from '@/components/ai-analysis-panel';
-import { parseFile, diffSheets, diffParagraphs, exportToExcel, detectBestKeyColumn, detectCrossKeyMapping } from '@/lib/file-utils';
-import type { ParsedFile, DiffResult, DiffType, SheetData, SheetDiffResult, DocumentDiffResult, ReconciliationSummary, MatchClassification } from '@/types';
+import { parseFile, diffSheets, diffParagraphs, exportToExcel, detectBestKeyColumn, detectCrossKeyMapping, detectTimeColumn } from '@/lib/file-utils';
+import type { ParsedFile, DiffResult, DiffType, SheetData, SheetDiffResult, DocumentDiffResult, ReconciliationSummary, MatchClassification, TimeGranularity } from '@/types';
 
 type CompareMode = 'auto' | 'sheet';
 type FileStatus = 'idle' | 'parsing' | 'success' | 'error';
@@ -39,6 +39,13 @@ export default function Home() {
   const [newKeyColumn, setNewKeyColumn] = useState<string>('');
   const [compareError, setCompareError] = useState<string>('');
 
+  // 时间列选择
+  const [oldTimeColumn, setOldTimeColumn] = useState<string>('');
+  const [newTimeColumn, setNewTimeColumn] = useState<string>('');
+  const [autoOldTimeColumn, setAutoOldTimeColumn] = useState<string>('');
+  const [autoNewTimeColumn, setAutoNewTimeColumn] = useState<string>('');
+  const [timeGranularity, setTimeGranularity] = useState<TimeGranularity | ''>('');
+
   // AI 设置持久化
   const [aiBaseUrl, setAiBaseUrl] = useState('https://api.openai.com/v1');
   const [aiModel, setAiModel] = useState('gpt-4o-mini');
@@ -51,11 +58,13 @@ export default function Home() {
     if (savedModel) setAiModel(savedModel);
   }, []);
 
-  const saveAISettings = useCallback(() => {
+  const saveAISettings = useCallback((base: string, model: string) => {
+    setAiBaseUrl(base);
+    setAiModel(model);
     localStorage.setItem('ai_api_key', apiKey);
-    localStorage.setItem('ai_base_url', aiBaseUrl);
-    localStorage.setItem('ai_model', aiModel);
-  }, [apiKey, aiBaseUrl, aiModel]);
+    localStorage.setItem('ai_base_url', base);
+    localStorage.setItem('ai_model', model);
+  }, [apiKey]);
 
   // 文件变化时重置主键选择
   const prevFilesLen = useMemo(() => files.length, [files]);
@@ -64,6 +73,11 @@ export default function Home() {
       setOldKeyColumn('');
       setNewKeyColumn('');
       setAutoKeyColumn('');
+      setOldTimeColumn('');
+      setNewTimeColumn('');
+      setAutoOldTimeColumn('');
+      setAutoNewTimeColumn('');
+      setTimeGranularity('');
     }
   }, [files.length]);
 
@@ -107,6 +121,20 @@ export default function Home() {
         if (parsed.type === 'excel' && parsed.data?.sheets && parsed.data.sheets.length > 0) {
           const bestKey = detectBestKeyColumn(parsed.data.sheets[0]);
           if (bestKey) setAutoKeyColumn(bestKey);
+          // 检测时间列
+          const timeCol = detectTimeColumn(parsed.data.sheets[0]);
+          if (timeCol) {
+            // 根据文件顺序设置 A 或 B 的时间列
+            setFiles((prev) => {
+              const excelFiles = prev.filter((pf) => pf.type === 'excel' && pf.data?.sheets);
+              if (excelFiles.length === 1) {
+                setAutoOldTimeColumn(timeCol);
+              } else if (excelFiles.length === 2) {
+                setAutoNewTimeColumn(timeCol);
+              }
+              return prev;
+            });
+          }
         }
       } catch (err) {
         setFiles((prev) =>
@@ -161,23 +189,26 @@ export default function Home() {
         }
 
         const results: SheetDiffResult[] = [];
+        const otc = oldTimeColumn || autoOldTimeColumn || undefined;
+        const ntc = newTimeColumn || autoNewTimeColumn || undefined;
+        const tg = timeGranularity || undefined;
         if (compareMode === 'sheet' && selectedSheet) {
           const oldSheet = oldSheets.find((s) => s.name === selectedSheet) || oldSheets[0];
           const newSheet = newSheets.find((s) => s.name === selectedSheet) || newSheets[0];
-          results.push(diffSheets(oldSheet, newSheet, keyCol, oldKeyCol, newKeyCol));
+          results.push(diffSheets(oldSheet, newSheet, keyCol, oldKeyCol, newKeyCol, otc, ntc, tg));
         } else {
           const matched = new Set<string>();
           for (const oldSheet of oldSheets) {
             const newSheet = newSheets.find((s) => s.name === oldSheet.name && !matched.has(s.name));
             if (newSheet) {
-              results.push(diffSheets(oldSheet, newSheet, keyCol, oldKeyCol, newKeyCol));
+              results.push(diffSheets(oldSheet, newSheet, keyCol, oldKeyCol, newKeyCol, otc, ntc, tg));
               matched.add(newSheet.name);
             }
           }
           const unmatchedOld = oldSheets.filter((s) => !matched.has(s.name));
           const unmatchedNew = newSheets.filter((s) => !matched.has(s.name));
           for (let i = 0; i < Math.min(unmatchedOld.length, unmatchedNew.length); i++) {
-            results.push(diffSheets(unmatchedOld[i], unmatchedNew[i], keyCol, oldKeyCol, newKeyCol));
+            results.push(diffSheets(unmatchedOld[i], unmatchedNew[i], keyCol, oldKeyCol, newKeyCol, otc, ntc, tg));
           }
         }
 
@@ -224,7 +255,7 @@ export default function Home() {
     } finally {
       setIsComparing(false);
     }
-  }, [files, compareMode, selectedSheet, selectedKeyColumn, suggestedKeyColumn, oldKeyColumn, newKeyColumn]);
+  }, [files, compareMode, selectedSheet, selectedKeyColumn, suggestedKeyColumn, oldKeyColumn, newKeyColumn, oldTimeColumn, newTimeColumn, autoOldTimeColumn, autoNewTimeColumn, timeGranularity]);
 
   const handleExport = useCallback(() => {
     if (diffResults.length === 0) return;
@@ -360,6 +391,48 @@ export default function Home() {
                         {oldKeyColumn || newKeyColumn ? '手动指定' : '自动识别（含值域重合检测）'}
                       </span>
                     </div>
+
+                    {/* 时间列选择 */}
+                    <div className="flex items-center gap-2 pt-1 border-t border-slate-100 mt-1">
+                      <span className="text-xs text-slate-500">A 时间列:</span>
+                      <Select value={oldTimeColumn || '__auto__'} onValueChange={(v) => setOldTimeColumn(v === '__auto__' ? '' : v)}>
+                        <SelectTrigger className="w-44 h-8 text-xs">
+                          <SelectValue placeholder={autoOldTimeColumn || '自动识别'} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__auto__">自动识别{autoOldTimeColumn ? ` (${autoOldTimeColumn})` : ''}</SelectItem>
+                          {(successFiles[0]?.data?.sheets?.[0]?.headers ?? []).map((h) => (
+                            <SelectItem key={h} value={h}>{h}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-slate-500">B 时间列:</span>
+                      <Select value={newTimeColumn || '__auto__'} onValueChange={(v) => setNewTimeColumn(v === '__auto__' ? '' : v)}>
+                        <SelectTrigger className="w-44 h-8 text-xs">
+                          <SelectValue placeholder={autoNewTimeColumn || '自动识别'} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__auto__">自动识别{autoNewTimeColumn ? ` (${autoNewTimeColumn})` : ''}</SelectItem>
+                          {(successFiles[1]?.data?.sheets?.[0]?.headers ?? []).map((h) => (
+                            <SelectItem key={h} value={h}>{h}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <span className="text-[10px] text-slate-400">粒度:</span>
+                      <Select value={timeGranularity || '__auto__'} onValueChange={(v) => setTimeGranularity(v === '__auto__' ? '' : v as TimeGranularity)}>
+                        <SelectTrigger className="w-20 h-8 text-xs">
+                          <SelectValue placeholder="自动" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__auto__">自动</SelectItem>
+                          <SelectItem value="day">按日</SelectItem>
+                          <SelectItem value="week">按周</SelectItem>
+                          <SelectItem value="month">按月</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
                 )}
 
@@ -483,13 +556,14 @@ export default function Home() {
               onApiKeyChange={setApiKey}
               apiBase={aiBaseUrl}
               apiModel={aiModel}
+              onSaveSettings={saveAISettings}
             />
           </div>
         )}
 
         {/* 版本标识 */}
         <footer className="mt-8 pb-6 text-center text-xs text-slate-400">
-          v2.5 · 2026-09-08 · 智能文件比对分析平台
+          v2.6 · 2026-04-23 · 智能文件比对分析平台
         </footer>
       </main>
     </div>
@@ -587,6 +661,42 @@ function ReconciliationPanel({ result }: { result: SheetDiffResult }) {
             <FileSpreadsheet className="h-4 w-4 text-violet-600" />
             对账汇总
           </h2>
+
+          {/* 主键匹配率信息条 */}
+          {result.matchQuality && (
+            <div className={`rounded-lg border px-3 py-2 mb-3 flex items-center justify-between text-sm ${
+              result.matchQuality.matchRate >= 0.95 ? 'bg-emerald-50 border-emerald-200'
+              : result.matchQuality.matchRate >= 0.8 ? 'bg-amber-50 border-amber-200'
+              : 'bg-red-50 border-red-200'
+            }`}>
+              <div className="flex items-center gap-2">
+                <Key className="h-3.5 w-3.5 opacity-60" />
+                <span className="text-slate-600">
+                  主键: {result.matchQuality.oldKey === result.matchQuality.newKey
+                    ? `「${result.matchQuality.oldKey}」`
+                    : `A「${result.matchQuality.oldKey}」↔ B「${result.matchQuality.newKey}」`}
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="font-medium text-slate-800">
+                  匹配 {fmtNum(result.matchQuality.matchedCount)} 单
+                </span>
+                <span className={`font-bold ${
+                  result.matchQuality.matchRate >= 0.95 ? 'text-emerald-700'
+                  : result.matchQuality.matchRate >= 0.8 ? 'text-amber-700'
+                  : 'text-red-700'
+                }`}>
+                  {(result.matchQuality.matchRate * 100).toFixed(1)}%
+                </span>
+              </div>
+            </div>
+          )}
+          {result.matchQuality?.warning && (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 mb-3 text-xs text-amber-700 flex items-start gap-2">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span>{result.matchQuality.warning}</span>
+            </div>
+          )}
 
           {/* 行数对比 */}
           <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 mb-3">
@@ -729,6 +839,147 @@ function ReconciliationPanel({ result }: { result: SheetDiffResult }) {
           </CardContent>
         </Card>
       )}
+
+      {/* 按时间对比 */}
+      {result.timeComparison && result.timeComparison.rows.length > 0 && (
+        <TimeComparisonPanel data={result.timeComparison} />
+      )}
     </div>
+  );
+}
+
+function TimeComparisonPanel({ data }: { data: import('@/types').TimeComparison }) {
+  const [sortBy, setSortBy] = useState<'time' | 'diff'>('time');
+
+  const sortedRows = useMemo(() => {
+    if (sortBy === 'time') return data.rows;
+    return [...data.rows].sort((a, b) => {
+      const aMax = Math.max(...Object.values(a.numericSums).map((s) => Math.abs(s.diff)));
+      const bMax = Math.max(...Object.values(b.numericSums).map((s) => Math.abs(s.diff)));
+      return bMax - aMax;
+    });
+  }, [data.rows, sortBy]);
+
+  const maxAbsDiff = useMemo(() => {
+    let max = 0;
+    for (const row of data.rows) {
+      for (const sums of Object.values(row.numericSums)) {
+        max = Math.max(max, Math.abs(sums.diff));
+      }
+    }
+    return max || 1;
+  }, [data.rows]);
+
+  const granularityLabel = data.granularity === 'day' ? '按日' : data.granularity === 'week' ? '按周' : '按月';
+
+  return (
+    <Card className="border-slate-200 shadow-sm">
+      <CardContent className="pt-5">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-slate-800 flex items-center gap-2">
+            <span className="text-violet-600">📅</span>
+            按时间对比（{granularityLabel}）
+          </h2>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-500">排序:</span>
+            <Select value={sortBy} onValueChange={(v) => setSortBy(v as 'time' | 'diff')}>
+              <SelectTrigger className="w-24 h-7 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="time">时间正序</SelectItem>
+                <SelectItem value="diff">差异降序</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        {/* 顶部摘要：差异最大的前3个期间 */}
+        {data.topDiffPeriods.length > 0 && (
+          <div className="mb-3 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+            <span className="font-medium">差异主要集中在：</span>
+            {data.topDiffPeriods.slice(0, 3).map((p, i) => (
+              <span key={i}>
+                {i > 0 && '、'}{p.period} {p.column} 差{fmtNum(Math.abs(p.diff))}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* 总合计 */}
+        <div className="mb-3 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs">
+          <span className="text-slate-600">全表合计：</span>
+          <span className="font-medium text-slate-800">A {fmtNum(data.totalOld)}</span>
+          <span className="text-slate-400 mx-1">vs</span>
+          <span className="font-medium text-slate-800">B {fmtNum(data.totalNew)}</span>
+          <span className={`font-semibold ml-2 ${data.totalDiff > 0 ? 'text-amber-600' : data.totalDiff < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+            差 {fmtNum(Math.abs(data.totalDiff))}
+          </span>
+        </div>
+
+        {/* 对比表 */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-slate-200">
+                <th className="text-left py-2 px-2 font-medium text-slate-600 sticky left-0 bg-white">期间</th>
+                {data.numericColumns.map((col) => (
+                  <th key={col} colSpan={3} className="text-center py-2 px-1 font-medium text-slate-600 border-l border-slate-100">{col}</th>
+                ))}
+              </tr>
+              <tr className="border-b border-slate-100 text-[10px] text-slate-400">
+                <th className="text-left py-1 px-2 sticky left-0 bg-white"></th>
+                {data.numericColumns.map((col) => (
+                  <React.Fragment key={col}>
+                    <th className="text-right py-1 px-1 font-normal">A</th>
+                    <th className="text-right py-1 px-1 font-normal">B</th>
+                    <th className="text-right py-1 px-1 font-normal border-r border-slate-100">差值</th>
+                  </React.Fragment>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sortedRows.map((row) => (
+                <tr key={row.period} className="border-b border-slate-50 hover:bg-slate-50/50">
+                  <td className="py-1.5 px-2 text-slate-700 whitespace-nowrap sticky left-0 bg-white">{row.periodLabel}</td>
+                  {data.numericColumns.map((col) => {
+                    const sums = row.numericSums[col];
+                    if (!sums) return (
+                      <React.Fragment key={col}>
+                        <td className="text-right py-1.5 px-1 text-slate-400">—</td>
+                        <td className="text-right py-1.5 px-1 text-slate-400">—</td>
+                        <td className="text-right py-1.5 px-1 text-slate-400 border-r border-slate-100">—</td>
+                      </React.Fragment>
+                    );
+                    const absDiff = Math.abs(sums.diff);
+                    const barWidth = maxAbsDiff > 0 ? (absDiff / maxAbsDiff) * 100 : 0;
+                    const isZero = absDiff < 0.01;
+                    return (
+                      <React.Fragment key={col}>
+                        <td className="text-right py-1.5 px-1 text-slate-600">{fmtNum(sums.oldSum)}</td>
+                        <td className="text-right py-1.5 px-1 text-slate-600">{fmtNum(sums.newSum)}</td>
+                        <td className={`text-right py-1.5 px-1 border-r border-slate-100 relative ${isZero ? 'text-emerald-600' : 'text-red-600'}`}>
+                          {isZero ? '✅' : (sums.diff > 0 ? '+' : '') + fmtNum(sums.diff)}
+                          {!isZero && (
+                            <div
+                              className={`absolute bottom-0 left-0 h-0.5 ${sums.diff > 0 ? 'bg-amber-400' : 'bg-red-400'}`}
+                              style={{ width: `${barWidth}%` }}
+                            />
+                          )}
+                        </td>
+                      </React.Fragment>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="text-[10px] text-slate-400 mt-2">
+          时间列：A「{data.oldTimeColumn}」↔ B「{data.newTimeColumn}」· 粒度：{granularityLabel}（自动：{data.autoGranularity === 'day' ? '按日' : data.autoGranularity === 'week' ? '按周' : '按月'}）
+        </p>
+      </CardContent>
+    </Card>
   );
 }

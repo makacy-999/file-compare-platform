@@ -4,6 +4,7 @@ import type {
   FieldHotspot, NumericChangeSummary, DiffStatistics, TypicalDiff,
   DocumentDiffResult, ReconciliationSummary, NumericColumnComparison,
   MatchClassification, MatchClassificationRow, CrossKeyMapping, MatchQuality,
+  TimeGranularity, TimeComparisonRow, TimeComparison,
 } from '@/types';
 import * as XLSX from 'xlsx';
 
@@ -466,6 +467,9 @@ export function diffSheets(
   keyColumn?: string,
   oldKeyColumn?: string,
   newKeyColumn?: string,
+  oldTimeColumn?: string,
+  newTimeColumn?: string,
+  timeGranularity?: TimeGranularity,
 ): SheetDiffResult {
   const allHeaders = [...new Set([...oldSheet.headers, ...newSheet.headers])];
   const keyScores = analyzeKeyColumns(oldSheet.headers.length > 0 ? oldSheet : newSheet);
@@ -701,6 +705,14 @@ export function diffSheets(
   const reconciliation = computeReconciliationSummary(oldSheet, newSheet, oldKey, newKey, columnMappings);
   const matchClassification = computeMatchClassification(rows, oldKey, newKey, columnMappings);
 
+  // 按时间对比
+  const effectiveOldTimeCol = oldTimeColumn || detectTimeColumn(oldSheet) || '';
+  const effectiveNewTimeCol = newTimeColumn || detectTimeColumn(newSheet) || '';
+  const timeComparisonResult = (effectiveOldTimeCol && effectiveNewTimeCol)
+    ? computeTimeComparison(oldSheet, newSheet, effectiveOldTimeCol, effectiveNewTimeCol, columnMappings, timeGranularity || null)
+    : undefined;
+  const timeComparison = timeComparisonResult ?? undefined;
+
   // 匹配质量统计
   const matchedCount = unchanged + modified + suspected;
   const minRows = Math.min(oldSheet.rowCount, newSheet.rowCount) || 1;
@@ -740,6 +752,7 @@ export function diffSheets(
     matchClassification,
     crossKeyMapping,
     matchQuality,
+    timeComparison,
   };
 }
 
@@ -959,6 +972,291 @@ export function computeMatchClassification(
     onlyOldSampleKeys,
     onlyNewSampleKeys,
     selfCheckPassed,
+  };
+}
+
+// ─── 按时间对比 ─────────────────────────────────────────────
+
+const TIME_COLUMN_PATTERNS = [
+  '日期', '时间', '单据日期', '业务日期', '创建日期', '发货日期', '出库日期',
+  '入库日期', '交易日期', '记账日期', '制单日期', '下单日期', '交货日期',
+  'date', 'time', 'datetime', 'created', 'updated', 'ship', 'deliver',
+  'month', '月', '年', '日',
+];
+
+export function parseRobustDate(val: unknown): Date | null {
+  if (val === null || val === undefined || val === '') return null;
+
+  // Excel serial date number
+  if (typeof val === 'number' && val > 1 && val < 200000) {
+    const excelEpoch = new Date(1899, 11, 30);
+    const ms = excelEpoch.getTime() + val * 86400000;
+    const d = new Date(ms);
+    if (!isNaN(d.getTime()) && d.getFullYear() > 1900 && d.getFullYear() < 2100) return d;
+  }
+
+  const str = String(val).trim();
+  if (!str) return null;
+
+  // "2026年9月1日" or "2026年09月01日"
+  const cnMatch = str.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?/);
+  if (cnMatch) {
+    const d = new Date(Number(cnMatch[1]), Number(cnMatch[2]) - 1, Number(cnMatch[3]));
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  // "20260901" (8-digit compact)
+  if (/^\d{8}$/.test(str)) {
+    const y = Number(str.slice(0, 4));
+    const m = Number(str.slice(4, 6));
+    const d = Number(str.slice(6, 8));
+    if (y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return new Date(y, m - 1, d);
+    }
+  }
+
+  // "2026/9/1", "2026-09-01", "2026.9.1" with optional time
+  const dateMatch = str.match(/(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/);
+  if (dateMatch) {
+    const y = Number(dateMatch[1]);
+    const m = Number(dateMatch[2]);
+    const d = Number(dateMatch[3]);
+    if (y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return new Date(y, m - 1, d);
+    }
+  }
+
+  // Fallback: try native Date parse but use local components to avoid UTC shift
+  const fallback = new Date(str);
+  if (!isNaN(fallback.getTime()) && fallback.getFullYear() > 1900) return fallback;
+
+  return null;
+}
+
+export function detectTimeColumn(sheet: SheetData, sampleSize = 500): string | null {
+  const candidates: Array<{ col: string; score: number }> = [];
+
+  for (const header of sheet.headers) {
+    const lower = header.toLowerCase();
+    const nameMatch = TIME_COLUMN_PATTERNS.some((p) => lower.includes(p.toLowerCase()));
+    if (nameMatch) {
+      // Verify by sampling values
+      const sample = sheet.rows.slice(0, sampleSize);
+      let parseable = 0;
+      for (const row of sample) {
+        if (parseRobustDate(row[header]) !== null) parseable++;
+      }
+      const ratio = sample.length > 0 ? parseable / sample.length : 0;
+      if (ratio >= 0.3) {
+        candidates.push({ col: header, score: 0.5 + ratio * 0.5 });
+      }
+    }
+  }
+
+  // If no name match, try value-based detection
+  if (candidates.length === 0) {
+    for (const header of sheet.headers) {
+      const sample = sheet.rows.slice(0, sampleSize);
+      let parseable = 0;
+      for (const row of sample) {
+        if (parseRobustDate(row[header]) !== null) parseable++;
+      }
+      const ratio = sample.length > 0 ? parseable / sample.length : 0;
+      if (ratio >= 0.7) {
+        candidates.push({ col: header, score: ratio });
+      }
+    }
+  }
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0].col;
+}
+
+function getPeriodKey(date: Date, granularity: TimeGranularity): string {
+  const y = date.getFullYear();
+  const m = date.getMonth();
+  const d = date.getDate();
+
+  switch (granularity) {
+    case 'day':
+      return `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    case 'week': {
+      const jan1 = new Date(y, 0, 1);
+      const dayOfYear = Math.floor((date.getTime() - jan1.getTime()) / 86400000) + 1;
+      const weekNum = Math.ceil((dayOfYear + jan1.getDay()) / 7);
+      return `${y}-W${String(weekNum).padStart(2, '0')}`;
+    }
+    case 'month':
+      return `${y}-${String(m + 1).padStart(2, '0')}`;
+  }
+}
+
+function getPeriodLabel(periodKey: string, granularity: TimeGranularity): string {
+  switch (granularity) {
+    case 'day': {
+      const parts = periodKey.split('-');
+      return `${parts[0]}年${Number(parts[1])}月${Number(parts[2])}日`;
+    }
+    case 'week':
+      return periodKey.replace('-W', ' 第') + '周';
+    case 'month': {
+      const parts = periodKey.split('-');
+      return `${parts[0]}年${Number(parts[1])}月`;
+    }
+  }
+}
+
+function detectAutoGranularity(allDates: Date[]): TimeGranularity {
+  if (allDates.length === 0) return 'month';
+  const minDate = new Date(Math.min(...allDates.map((d) => d.getTime())));
+  const maxDate = new Date(Math.max(...allDates.map((d) => d.getTime())));
+  const spanDays = (maxDate.getTime() - minDate.getTime()) / 86400000;
+  if (spanDays <= 62) return 'day';
+  return 'month';
+}
+
+export function computeTimeComparison(
+  oldSheet: SheetData,
+  newSheet: SheetData,
+  oldTimeCol: string,
+  newTimeCol: string,
+  columnMappings: ColumnMapping[],
+  granularity: TimeGranularity | null,
+  scope: 'all' | 'both' = 'all',
+): TimeComparison | null {
+  if (!oldTimeCol || !newTimeCol) return null;
+
+  const numericMappings = columnMappings.filter((m) => {
+    const sampleOld = oldSheet.rows.slice(0, 50);
+    const sampleNew = newSheet.rows.slice(0, 50);
+    let numCount = 0;
+    for (const row of sampleOld) {
+      const { num } = parseRobustNumber(row[m.oldColumn]);
+      if (num !== null) numCount++;
+    }
+    for (const row of sampleNew) {
+      const { num } = parseRobustNumber(row[m.newColumn]);
+      if (num !== null) numCount++;
+    }
+    return numCount > (sampleOld.length + sampleNew.length) * 0.3;
+  });
+
+  if (numericMappings.length === 0) return null;
+
+  // Collect all dates for auto granularity
+  const allDates: Date[] = [];
+  for (const row of oldSheet.rows) {
+    const d = parseRobustDate(row[oldTimeCol]);
+    if (d) allDates.push(d);
+  }
+  for (const row of newSheet.rows) {
+    const d = parseRobustDate(row[newTimeCol]);
+    if (d) allDates.push(d);
+  }
+
+  const autoGranularity = detectAutoGranularity(allDates);
+  const effectiveGranularity = granularity ?? autoGranularity;
+
+  // Build period maps
+  const periodMap = new Map<string, {
+    oldSums: Record<string, number>;
+    newSums: Record<string, number>;
+    oldUnparsed: number;
+    newUnparsed: number;
+  }>();
+
+  const ensurePeriod = (key: string) => {
+    if (!periodMap.has(key)) {
+      const sums: Record<string, number> = {};
+      for (const m of numericMappings) sums[m.oldColumn] = 0;
+      periodMap.set(key, { oldSums: { ...sums }, newSums: { ...sums }, oldUnparsed: 0, newUnparsed: 0 });
+    }
+  };
+
+  for (const row of oldSheet.rows) {
+    const d = parseRobustDate(row[oldTimeCol]);
+    if (!d) continue;
+    const key = getPeriodKey(d, effectiveGranularity);
+    ensurePeriod(key);
+    const entry = periodMap.get(key)!;
+    for (const m of numericMappings) {
+      const { num, unparsed } = parseRobustNumber(row[m.oldColumn]);
+      if (num !== null) entry.oldSums[m.oldColumn] += num;
+      if (unparsed) entry.oldUnparsed++;
+    }
+  }
+
+  for (const row of newSheet.rows) {
+    const d = parseRobustDate(row[newTimeCol]);
+    if (!d) continue;
+    const key = getPeriodKey(d, effectiveGranularity);
+    ensurePeriod(key);
+    const entry = periodMap.get(key)!;
+    for (const m of numericMappings) {
+      const { num, unparsed } = parseRobustNumber(row[m.newColumn]);
+      if (num !== null) entry.newSums[m.oldColumn] += num;
+      if (unparsed) entry.newUnparsed++;
+    }
+  }
+
+  // Build rows sorted by period
+  const sortedKeys = Array.from(periodMap.keys()).sort();
+  const rows: TimeComparisonRow[] = sortedKeys.map((key) => {
+    const entry = periodMap.get(key)!;
+    const numericSums: Record<string, { oldSum: number; newSum: number; diff: number }> = {};
+    for (const m of numericMappings) {
+      numericSums[m.oldColumn] = {
+        oldSum: entry.oldSums[m.oldColumn],
+        newSum: entry.newSums[m.oldColumn],
+        diff: entry.newSums[m.oldColumn] - entry.oldSums[m.oldColumn],
+      };
+    }
+    return {
+      period: key,
+      periodLabel: getPeriodLabel(key, effectiveGranularity),
+      numericSums,
+      oldUnparsed: entry.oldUnparsed,
+      newUnparsed: entry.newUnparsed,
+    };
+  });
+
+  // Find top diff periods
+  const topDiffPeriods: TimeComparison['topDiffPeriods'] = [];
+  for (const row of rows) {
+    for (const [col, sums] of Object.entries(row.numericSums)) {
+      topDiffPeriods.push({
+        period: row.periodLabel,
+        column: col,
+        diff: sums.diff,
+        absDiff: Math.abs(sums.diff),
+      });
+    }
+  }
+  topDiffPeriods.sort((a, b) => b.absDiff - a.absDiff);
+
+  // Totals
+  let totalOld = 0;
+  let totalNew = 0;
+  for (const row of rows) {
+    for (const sums of Object.values(row.numericSums)) {
+      totalOld += sums.oldSum;
+      totalNew += sums.newSum;
+    }
+  }
+
+  return {
+    oldTimeColumn: oldTimeCol,
+    newTimeColumn: newTimeCol,
+    granularity: effectiveGranularity,
+    autoGranularity,
+    rows,
+    numericColumns: numericMappings.map((m) => m.oldColumn),
+    topDiffPeriods: topDiffPeriods.slice(0, 10),
+    totalOld,
+    totalNew,
+    totalDiff: totalNew - totalOld,
+    scope,
   };
 }
 
@@ -1267,6 +1565,40 @@ export function exportToExcel(results: Array<SheetDiffResult | DocumentDiffResul
         utils.book_append_sheet(wb, reconSheet, `${sheetResult.sheetName}-对账汇总`);
       }
 
+      // 按时间对比 sheet
+      if (sheetResult.timeComparison && sheetResult.timeComparison.rows.length > 0) {
+        const tc = sheetResult.timeComparison;
+        const granularityLabel = tc.granularity === 'day' ? '按日' : tc.granularity === 'week' ? '按周' : '按月';
+        const tcData: unknown[][] = [
+          ['按时间对比', `粒度: ${granularityLabel}`],
+          ['时间列', `A: ${tc.oldTimeColumn}`, `B: ${tc.newTimeColumn}`],
+          [''],
+          ['期间', ...tc.numericColumns.flatMap((col) => [`${col}(A)`, `${col}(B)`, `${col}(差值)`])],
+        ];
+        for (const row of tc.rows) {
+          const vals: unknown[] = [row.periodLabel];
+          for (const col of tc.numericColumns) {
+            const sums = row.numericSums[col];
+            if (sums) {
+              vals.push(sums.oldSum, sums.newSum, sums.diff);
+            } else {
+              vals.push('—', '—', '—');
+            }
+          }
+          tcData.push(vals);
+        }
+        tcData.push([''], ['全表合计', `A: ${tc.totalOld}`, `B: ${tc.totalNew}`, `差: ${tc.totalDiff}`]);
+        if (tc.topDiffPeriods.length > 0) {
+          tcData.push([''], ['差异最大的期间 Top' + tc.topDiffPeriods.length]);
+          tcData.push(['期间', '列', '差值']);
+          for (const p of tc.topDiffPeriods) {
+            tcData.push([p.period, p.column, p.diff]);
+          }
+        }
+        const tcSheet = utils.aoa_to_sheet(tcData);
+        utils.book_append_sheet(wb, tcSheet, `${sheetResult.sheetName}-按时间对比`);
+      }
+
       // 明细 sheet
       const detailData: unknown[][] = [
         ['状态', '主键', ...sheetResult.headers],
@@ -1298,6 +1630,7 @@ export function buildDiffSummary(results: Array<SheetDiffResult | DocumentDiffRe
   const warnings: string[] = [];
   let reconciliation: Record<string, unknown> | undefined;
   let matchClassification: Record<string, unknown> | undefined;
+  let timeComparison: Record<string, unknown> | undefined;
 
   for (const r of results) {
     if ('sheetName' in r) {
@@ -1352,6 +1685,27 @@ export function buildDiffSummary(results: Array<SheetDiffResult | DocumentDiffRe
           onlyNewSampleKeys: mc.onlyNewSampleKeys.slice(0, 20),
         };
       }
+      // 按时间对比数据
+      if (sr.timeComparison && sr.timeComparison.rows.length > 0) {
+        timeComparison = {
+          oldTimeColumn: sr.timeComparison.oldTimeColumn,
+          newTimeColumn: sr.timeComparison.newTimeColumn,
+          granularity: sr.timeComparison.granularity,
+          totalOld: sr.timeComparison.totalOld,
+          totalNew: sr.timeComparison.totalNew,
+          totalDiff: sr.timeComparison.totalDiff,
+          topDiffPeriods: sr.timeComparison.topDiffPeriods.slice(0, 10),
+          periodCount: sr.timeComparison.rows.length,
+          rows: sr.timeComparison.rows.length > 62
+            ? sr.timeComparison.topDiffPeriods.slice(0, 10).map((p) => ({
+                period: p.period, column: p.column, diff: p.diff,
+              }))
+            : sr.timeComparison.rows.map((row) => ({
+                period: row.periodLabel,
+                numericSums: row.numericSums,
+              })),
+        };
+      }
     }
   }
 
@@ -1390,6 +1744,7 @@ export function buildDiffSummary(results: Array<SheetDiffResult | DocumentDiffRe
     matchClassification,
     matchQuality,
     crossKeyMapping,
+    timeComparison,
   };
 }
 
@@ -1404,6 +1759,7 @@ export function generateLocalAnalysis(summary: Record<string, unknown>): string 
   const reconciliation = summary.reconciliation as Record<string, unknown> | undefined;
   const matchClassification = summary.matchClassification as Record<string, unknown> | undefined;
   const matchQuality = summary.matchQuality as Record<string, unknown> | undefined;
+  const timeComparison = summary.timeComparison as Record<string, unknown> | undefined;
 
   const sections: string[] = [];
 
@@ -1431,6 +1787,32 @@ export function generateLocalAnalysis(summary: Record<string, unknown>): string 
   sections.push(`比对共涉及 ${ov.totalRows} 行数据，整体变更率 ${(ov.changeRate * 100).toFixed(1)}%。`);
   sections.push(`其中新增 ${ov.added} 行、删除 ${ov.removed} 行、修改 ${ov.modified} 行、疑似匹配 ${ov.suspected} 行、未变 ${ov.unchanged} 行。`);
   sections.push('');
+
+  // 按时间对比
+  if (timeComparison) {
+    const tcRows = (timeComparison.rows || []) as Array<{ period: string; label: string; oldCount: number; newCount: number; diff: number; absDiff: number }>;
+    const granularity = timeComparison.granularity as string;
+    const oldCol = timeComparison.oldColumn as string;
+    const newCol = timeComparison.newColumn as string;
+    const totalOld = tcRows.reduce((s, r) => s + r.oldCount, 0);
+    const totalNew = tcRows.reduce((s, r) => s + r.newCount, 0);
+    const totalDiff = tcRows.reduce((s, r) => s + r.absDiff, 0);
+    const granLabel = granularity === 'day' ? '日' : granularity === 'week' ? '周' : '月';
+    sections.push(`【按时间对比（${granLabel}粒度）】`);
+    sections.push(`时间列: A「${oldCol}」/ B「${newCol}」，共 ${tcRows.length} 个期间。`);
+    sections.push(`全表合计: A ${totalOld} 单 / B ${totalNew} 单，差 ${totalNew - totalOld} 单。期间差异绝对值累计 ${totalDiff} 单。`);
+    const sorted = [...tcRows].sort((a, b) => b.absDiff - a.absDiff);
+    if (sorted.length > 0 && sorted[0].absDiff > 0) {
+      sections.push(`差异最大期间: ${sorted[0].label}（A:${sorted[0].oldCount} / B:${sorted[0].newCount}，差 ${sorted[0].diff > 0 ? '+' : ''}${sorted[0].diff}）`);
+    }
+    const diffPeriods = tcRows.filter((r) => r.absDiff > 0);
+    if (diffPeriods.length > 0) {
+      sections.push(`有差异期间: ${diffPeriods.length} / ${tcRows.length} 个期间存在件数差异。`);
+    } else {
+      sections.push('所有期间件数完全一致。');
+    }
+    sections.push('');
+  }
 
   // 差异量化拆解
   sections.push('【重点风险 — 差异量化拆解】');
@@ -1530,6 +1912,13 @@ export function generateLocalAnalysis(summary: Record<string, unknown>): string 
     sections.push('• 对数值变动超过 5% 的字段进行业务验证，确认变更合理性。');
   }
   sections.push('• 建议统一日期和数值格式，减少因格式差异导致的误报。');
+  if (timeComparison) {
+    const tcRows = (timeComparison.rows || []) as Array<{ period: string; label: string; oldCount: number; newCount: number; diff: number; absDiff: number }>;
+    const sorted = [...tcRows].sort((a, b) => b.absDiff - a.absDiff).filter((r) => r.absDiff > 0);
+    if (sorted.length > 0) {
+      sections.push(`• 优先核查差异最大的时间段「${sorted[0].label}」（差 ${sorted[0].diff > 0 ? '+' : ''}${sorted[0].diff} 单），排查该时段是否有漏单或重复录入。`);
+    }
+  }
   sections.push('• 配置 API Key 可获取更深度的 AI 智能分析与业务原因推断。');
 
   return sections.join('\n');

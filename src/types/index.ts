@@ -86,6 +86,7 @@ export interface SheetDiffResult {
   matchClassification?: MatchClassification;
   crossKeyMapping?: CrossKeyMapping;
   matchQuality?: MatchQuality;
+  timeComparison?: TimeComparison;
 }
 
 // 主键匹配质量
@@ -247,6 +248,32 @@ export interface CrossKeyMapping {
   newKeyColumn: string;
   method: 'name' | 'valueOverlap' | 'auto' | 'manual' | 'partialA' | 'partialB';
   overlapRatio: number;
+}
+
+// ─── 按时间对比类型 ─────────────────────────────────────────
+
+export type TimeGranularity = 'day' | 'week' | 'month';
+
+export interface TimeComparisonRow {
+  period: string;
+  periodLabel: string;
+  numericSums: Record<string, { oldSum: number; newSum: number; diff: number }>;
+  oldUnparsed: number;
+  newUnparsed: number;
+}
+
+export interface TimeComparison {
+  oldTimeColumn: string;
+  newTimeColumn: string;
+  granularity: TimeGranularity;
+  autoGranularity: TimeGranularity;
+  rows: TimeComparisonRow[];
+  numericColumns: string[];
+  topDiffPeriods: Array<{ period: string; column: string; diff: number; absDiff: number }>;
+  totalOld: number;
+  totalNew: number;
+  totalDiff: number;
+  scope: 'all' | 'both';
 }
 
 // AI 分析相关

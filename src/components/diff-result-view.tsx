@@ -206,7 +206,9 @@ function SheetDiffCard({ result, filter: externalFilter, onFilterChange }: {
         )
       );
     }
-    return rows;
+    // 差异优先排序：修改 > 新增 > 删除 > 疑似 > 未变
+    const priority: Record<string, number> = { modified: 0, added: 1, removed: 2, suspected: 3, unchanged: 4 };
+    return [...rows].sort((a, b) => (priority[a.diffType] ?? 5) - (priority[b.diffType] ?? 5));
   }, [result.rows, filter, search]);
 
   const toggleRow = (rowKey: string) => {
