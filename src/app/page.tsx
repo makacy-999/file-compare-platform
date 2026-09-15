@@ -47,9 +47,11 @@ export default function Home() {
   const [timeGranularity, setTimeGranularity] = useState<TimeGranularity | ''>('');
   const [timeScope, setTimeScope] = useState<'all' | 'both'>('all');
 
-  // AI 设置持久化
-  const [aiBaseUrl, setAiBaseUrl] = useState('https://api.openai.com/v1');
-  const [aiModel, setAiModel] = useState('gpt-4o-mini');
+  // AI 设置持久化（默认智谱 GLM-5.3-Flash）
+  const [aiBaseUrl, setAiBaseUrl] = useState('https://open.bigmodel.cn/api/paas/v4');
+  const [aiModel, setAiModel] = useState('glm-5.3-flash');
+  // 比对完成后自增，触发 AI 面板自动分析
+  const [aiAutoTrigger, setAiAutoTrigger] = useState(0);
   useEffect(() => {
     const savedKey = localStorage.getItem('ai_api_key');
     const savedBase = localStorage.getItem('ai_base_url');
@@ -223,6 +225,7 @@ export default function Home() {
         }
 
         setDiffResults(results);
+        setAiAutoTrigger((c) => c + 1);
       } else if (isDocA && isDocB) {
         const oldParas = fileA.data?.paragraphs ?? [];
         const newParas = fileB.data?.paragraphs ?? [];
@@ -248,6 +251,7 @@ export default function Home() {
           items,
         };
         setDiffResults([docResult]);
+        setAiAutoTrigger((c) => c + 1);
       } else {
         setCompareError('不支持的文件类型组合，请上传两个 Excel 或两个 Word/PDF 文件');
       }
@@ -569,6 +573,7 @@ export default function Home() {
               apiBase={aiBaseUrl}
               apiModel={aiModel}
               onSaveSettings={saveAISettings}
+              autoTrigger={aiAutoTrigger}
             />
           </div>
         )}

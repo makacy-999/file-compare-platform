@@ -16,9 +16,11 @@ interface AIAnalysisPanelProps {
   apiBase?: string;
   apiModel?: string;
   onSaveSettings?: (base: string, model: string) => void;
+  /** 比对完成后的触发计数，递增时自动开始 AI 分析 */
+  autoTrigger?: number;
 }
 
-export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, apiModel, onSaveSettings }: AIAnalysisPanelProps) {
+export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, apiModel, onSaveSettings, autoTrigger = 0 }: AIAnalysisPanelProps) {
   const [analysis, setAnalysis] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -61,7 +63,7 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
     const userPrompt = buildUserPrompt(structuredSummary);
 
     try {
-      const baseURL = (localBase || apiBase || 'https://api.openai.com/v1').replace(/\/+$/, '');
+      const baseURL = (localBase || apiBase || 'https://open.bigmodel.cn/api/paas/v4').replace(/\/+$/, '');
       const url = `${baseURL}/chat/completions`;
 
       const res = await fetch(url, {
@@ -71,7 +73,7 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
           'Authorization': `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          model: localModel || apiModel || 'gpt-4o-mini',
+          model: localModel || apiModel || 'glm-5.3-flash',
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
@@ -136,6 +138,23 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
   };
 
   const handleStop = () => { abortRef.current?.abort(); setIsAnalyzing(false); };
+
+  // 比对完成后自动触发 AI 分析（GLM-5.3-Flash）
+  const handleAnalyzeRef = useRef(handleAnalyze);
+  handleAnalyzeRef.current = handleAnalyze;
+  useEffect(() => {
+    if (autoTrigger <= 0) return;
+    if (diffResults.length === 0) return;
+    if (isAnalyzing) return;
+    if (apiKey?.trim()) {
+      const timer = setTimeout(() => handleAnalyzeRef.current(), 300);
+      return () => clearTimeout(timer);
+    } else {
+      // 未配置 Key 时自动打开设置面板引导用户
+      setShowSettings(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoTrigger, diffResults.length]);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(analysis);
@@ -207,7 +226,7 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
                 <div>
                   <label className="text-[10px] text-slate-500 mb-0.5 block">API Base URL（OpenAI 兼容格式）</label>
                   <Input
-                    placeholder="https://api.openai.com/v1"
+                    placeholder="https://open.bigmodel.cn/api/paas/v4"
                     value={localBase}
                     onChange={(e) => setLocalBase(e.target.value)}
                     className="h-8 text-xs"
@@ -216,7 +235,7 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
                 <div>
                   <label className="text-[10px] text-slate-500 mb-0.5 block">模型名称</label>
                   <Input
-                    placeholder="gpt-4o-mini"
+                    placeholder="glm-5.3-flash"
                     value={localModel}
                     onChange={(e) => setLocalModel(e.target.value)}
                     className="h-8 text-xs"
@@ -234,6 +253,13 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
                 >
                   {settingsSaved ? '✓ 已保存' : '保存设置'}
                 </Button>
+                <p className="text-[10px] text-slate-400 leading-relaxed">
+                  推荐智谱 GLM-5.3-Flash：到{' '}
+                  <a href="https://open.bigmodel.cn/usercenter/apikeys" target="_blank" rel="noreferrer" className="underline text-violet-600">
+                    open.bigmodel.cn
+                  </a>{' '}
+                  免费注册并创建 API Key，默认已对接该模型。
+                </p>
               </div>
             )}
           </div>
