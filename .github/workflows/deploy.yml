@@ -49,7 +49,7 @@ jobs:
         run: pnpm install
 
       - name: Build static site
-        run: pnpm build
+        run: npx next build
         env:
           GITHUB_PAGES: 'true'
 

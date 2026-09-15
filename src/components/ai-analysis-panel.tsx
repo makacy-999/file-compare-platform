@@ -11,8 +11,8 @@ import type { DiffResult, SheetDiffResult } from '@/types';
 
 // 内置安全接入：Supabase Edge Function 代理
 // API Key 以 AES-256-GCM 加密存于数据库，解密与调用均在服务端完成，前端不接触明文
-const LLM_PROXY_URL = 'https://pvkffppdfokkdnzjcvjw.supabase.co/functions/v1/llm-proxy';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB2a2ZmcHBkZm9ra2Ruempjdmp3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMwNzYzNzAsImV4cCI6MjA2ODY1MjM3MH0.VH8UxWpZDKAaHLEFBTKLGS4A-ZqAgGQYcp5N-wM_jzY';
+const LLM_PROXY_URL = 'https://br-merry-duck-687e1308.supabase2.aidap-global.cn-beijing.volces.com/functions/v1/llm-proxy';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjMzNjk5Njk5NjYsInJvbGUiOiJhbm9uIn0.4n0G-oD4uVZitavdbxuJdIzUAwFg7-FW4S_-Ury5Vh8';
 
 const DEFAULT_MODEL = 'glm-5.3-flash';
 const DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
