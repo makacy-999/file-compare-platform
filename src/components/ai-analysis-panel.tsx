@@ -9,6 +9,14 @@ import { cn } from '@/lib/utils';
 import { buildDiffSummary, generateLocalAnalysis } from '@/lib/file-utils';
 import type { DiffResult, SheetDiffResult } from '@/types';
 
+// 内置安全接入：Supabase Edge Function 代理
+// API Key 以 AES-256-GCM 加密存于数据库，解密与调用均在服务端完成，前端不接触明文
+const LLM_PROXY_URL = 'https://pvkffppdfokkdnzjcvjw.supabase.co/functions/v1/llm-proxy';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB2a2ZmcHBkZm9ra2Ruempjdmp3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMwNzYzNzAsImV4cCI6MjA2ODY1MjM3MH0.VH8UxWpZDKAaHLEFBTKLGS4A-ZqAgGQYcp5N-wM_jzY';
+
+const DEFAULT_MODEL = 'glm-5.3-flash';
+const DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
+
 interface AIAnalysisPanelProps {
   diffResults: DiffResult[];
   apiKey?: string;
@@ -32,7 +40,8 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const hasKey = !!apiKey?.trim();
+  // 内置安全代理（GLM-5.3-Flash，密钥加密存储于数据库）始终可用；用户自定义 Key 为可选直连
+  const hasKey = true;
 
   const structuredSummary = useMemo(() => {
     if (diffResults.length === 0) return null;
@@ -63,23 +72,42 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
     const userPrompt = buildUserPrompt(structuredSummary);
 
     try {
-      const baseURL = (localBase || apiBase || 'https://open.bigmodel.cn/api/paas/v4').replace(/\/+$/, '');
-      const url = `${baseURL}/chat/completions`;
+      // 未配置自定义 Key 时走内置安全代理（服务端解密并调用 GLM-5.3-Flash）
+      const useProxy = !apiKey?.trim();
+      const baseURL = (localBase || apiBase || DEFAULT_BASE_URL).replace(/\/+$/, '');
 
-      const res = await fetch(url, {
+      const requestHeaders: Record<string, string> = useProxy
+        ? {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          }
+        : {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+          };
+
+      const requestBody = useProxy
+        ? {
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            temperature: 0.5,
+            max_tokens: 4096,
+          }
+        : {
+            model: localModel || apiModel || DEFAULT_MODEL,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            stream: true,
+          };
+
+      const res = await fetch(useProxy ? LLM_PROXY_URL : `${baseURL}/chat/completions`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: localModel || apiModel || 'glm-5.3-flash',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          stream: true,
-        }),
+        headers: requestHeaders,
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
 
@@ -146,13 +174,9 @@ export function AIAnalysisPanel({ diffResults, apiKey, onApiKeyChange, apiBase, 
     if (autoTrigger <= 0) return;
     if (diffResults.length === 0) return;
     if (isAnalyzing) return;
-    if (apiKey?.trim()) {
-      const timer = setTimeout(() => handleAnalyzeRef.current(), 300);
-      return () => clearTimeout(timer);
-    } else {
-      // 未配置 Key 时自动打开设置面板引导用户
-      setShowSettings(true);
-    }
+    // 内置安全代理始终可用（GLM-5.3-Flash），直接自动触发
+    const timer = setTimeout(() => handleAnalyzeRef.current(), 300);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoTrigger, diffResults.length]);
 

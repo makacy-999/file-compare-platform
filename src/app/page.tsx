@@ -1,7 +1,7 @@
 'use client';
 
-// 默认接入智谱 GLM-5.3-Flash（用户提供的 Key，仅用于本人部署）
-const DEFAULT_ZHIPU_API_KEY = '9535749d94934b479a298a776ceea74c.F2tQPiXrjTw3ii3N';
+// AI 安全接入：API Key 已 AES-256-GCM 加密存储于 Supabase 数据库（app_secrets 表，RLS 保护），
+// 由 Edge Function (llm-proxy) 解密并代理调用 GLM-5.3-Flash，前端不接触明文密钥。
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
@@ -35,7 +35,7 @@ export default function Home() {
   const [compareMode, setCompareMode] = useState<CompareMode>('auto');
   const [selectedSheet, setSelectedSheet] = useState<string>('');
   const [filter, setFilter] = useState<'all' | DiffType>('all');
-  const [apiKey, setApiKey] = useState(DEFAULT_ZHIPU_API_KEY);
+  const [apiKey, setApiKey] = useState('');
   const [selectedKeyColumn, setSelectedKeyColumn] = useState<string>('');
   const [autoKeyColumn, setAutoKeyColumn] = useState<string>('');
   const [oldKeyColumn, setOldKeyColumn] = useState<string>('');
@@ -60,7 +60,7 @@ export default function Home() {
     const savedBase = localStorage.getItem('ai_base_url');
     const savedModel = localStorage.getItem('ai_model');
     if (savedKey) setApiKey(savedKey);
-    else setApiKey(DEFAULT_ZHIPU_API_KEY);
+    else setApiKey(''); // 无自定义 Key 时走 Edge Function 安全代理
     if (savedBase) setAiBaseUrl(savedBase);
     if (savedModel) setAiModel(savedModel);
   }, []);
