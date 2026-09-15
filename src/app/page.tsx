@@ -1,5 +1,8 @@
 'use client';
 
+// 默认接入智谱 GLM-5.3-Flash（用户提供的 Key，仅用于本人部署）
+const DEFAULT_ZHIPU_API_KEY = '9535749d94934b479a298a776ceea74c.F2tQPiXrjTw3ii3N';
+
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   Upload, FileSpreadsheet, FileText, Image as ImageIcon, File,
@@ -32,7 +35,7 @@ export default function Home() {
   const [compareMode, setCompareMode] = useState<CompareMode>('auto');
   const [selectedSheet, setSelectedSheet] = useState<string>('');
   const [filter, setFilter] = useState<'all' | DiffType>('all');
-  const [apiKey, setApiKey] = useState('');
+  const [apiKey, setApiKey] = useState(DEFAULT_ZHIPU_API_KEY);
   const [selectedKeyColumn, setSelectedKeyColumn] = useState<string>('');
   const [autoKeyColumn, setAutoKeyColumn] = useState<string>('');
   const [oldKeyColumn, setOldKeyColumn] = useState<string>('');
@@ -57,6 +60,7 @@ export default function Home() {
     const savedBase = localStorage.getItem('ai_base_url');
     const savedModel = localStorage.getItem('ai_model');
     if (savedKey) setApiKey(savedKey);
+    else setApiKey(DEFAULT_ZHIPU_API_KEY);
     if (savedBase) setAiBaseUrl(savedBase);
     if (savedModel) setAiModel(savedModel);
   }, []);
